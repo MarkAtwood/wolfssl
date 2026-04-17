@@ -1304,6 +1304,139 @@ static int caliptra_hash_free(wc_CryptoInfo* info)
 #endif /* WOLF_CRYPTO_CB_FREE */
 
 /* =========================================================================
+ * SetKey — import raw key material into Caliptra key vault
+ *
+ * Called when the application invokes a standard wolfSSL key-setup function
+ * (wc_AesSetKey, wc_HmacSetKey, wc_ecc_import_*) on an object whose devId
+ * is WOLF_CALIPTRA_DEVID.  Imports the key via CM_IMPORT, allocates a
+ * CaliptraCmk on the heap, and stores it in obj->devCtx so that subsequent
+ * crypto operations can reference the vault slot without re-importing.
+ *
+ * If obj->devCtx already holds a CaliptraCmk (from a prior SetKey call on
+ * the same object), the old vault slot is deleted and the heap block freed
+ * before the new key is imported, preventing vault exhaustion on key
+ * rotation.
+ *
+ * RSA key types are not supported by Caliptra and return CRYPTOCB_UNAVAILABLE
+ * so wolfSSL falls through to the software RSA implementation.
+ * ========================================================================= */
+#ifdef WOLF_CRYPTO_CB_SETKEY
+static int caliptra_setkey(const wc_CryptoInfo* info)
+{
+    const byte*  key_data  = NULL;
+    word32       key_len   = 0;
+    word32       key_usage = 0;
+    CaliptraCmk* new_cmk   = NULL;
+    void**       devctx_ptr = NULL;
+    int          ret       = 0;
+    /* Scratch buffer for ECC coordinate export: Qx || Qy, each up to
+     * ECC_MAXSIZE bytes.  Zeroed in cleanup on all paths. */
+    byte         ecc_buf[2 * ECC_MAXSIZE];
+
+    XMEMSET(ecc_buf, 0, sizeof(ecc_buf));
+
+    switch (info->setkey.type) {
+
+        case WC_SETKEY_AES: {
+            Aes* aes = (Aes*)info->setkey.obj;
+            if (aes == NULL || info->setkey.key == NULL ||
+                    info->setkey.keySz == 0)
+                return BAD_FUNC_ARG;
+            devctx_ptr = (void**)&aes->devCtx;
+            key_data   = (const byte*)info->setkey.key;
+            key_len    = info->setkey.keySz;
+            key_usage  = CMB_KEY_USAGE_AES;
+            break;
+        }
+
+        case WC_SETKEY_HMAC: {
+            Hmac* hmac = (Hmac*)info->setkey.obj;
+            if (hmac == NULL || info->setkey.key == NULL ||
+                    info->setkey.keySz == 0)
+                return BAD_FUNC_ARG;
+            devctx_ptr = (void**)&hmac->devCtx;
+            key_data   = (const byte*)info->setkey.key;
+            key_len    = info->setkey.keySz;
+            key_usage  = CMB_KEY_USAGE_HMAC;
+            break;
+        }
+
+#if defined(HAVE_ECC)
+        case WC_SETKEY_ECC_PRIV: {
+            ecc_key* dst_key  = (ecc_key*)info->setkey.obj;
+            ecc_key* src_key  = (ecc_key*)info->setkey.key;
+            word32   field_sz = info->setkey.keySz;
+            if (dst_key == NULL || src_key == NULL ||
+                    field_sz == 0 || field_sz > ECC_MAXSIZE)
+                return BAD_FUNC_ARG;
+            ret = mp_to_unsigned_bin_len(&src_key->k, ecc_buf, (int)field_sz);
+            if (ret != MP_OKAY)
+                goto cleanup;
+            devctx_ptr = (void**)&dst_key->devCtx;
+            key_data   = ecc_buf;
+            key_len    = field_sz;
+            key_usage  = CMB_KEY_USAGE_ECDSA;
+            break;
+        }
+
+        case WC_SETKEY_ECC_PUB: {
+            ecc_key* dst_key  = (ecc_key*)info->setkey.obj;
+            ecc_key* src_key  = (ecc_key*)info->setkey.key;
+            word32   field_sz = info->setkey.keySz;
+            if (dst_key == NULL || src_key == NULL ||
+                    field_sz == 0 || field_sz > ECC_MAXSIZE)
+                return BAD_FUNC_ARG;
+            /* Export Qx || Qy as two consecutive field-element-sized chunks. */
+            ret = mp_to_unsigned_bin_len(src_key->pubkey.x,
+                                         ecc_buf, (int)field_sz);
+            if (ret == MP_OKAY)
+                ret = mp_to_unsigned_bin_len(src_key->pubkey.y,
+                                             ecc_buf + field_sz, (int)field_sz);
+            if (ret != MP_OKAY)
+                goto cleanup;
+            devctx_ptr = (void**)&dst_key->devCtx;
+            key_data   = ecc_buf;
+            key_len    = 2 * field_sz;
+            key_usage  = CMB_KEY_USAGE_ECDSA;
+            break;
+        }
+#endif /* HAVE_ECC */
+
+        default:
+            /* RSA and any future types Caliptra does not support: return
+             * CRYPTOCB_UNAVAILABLE so wolfSSL handles them in software. */
+            return CRYPTOCB_UNAVAILABLE;
+    }
+
+    /* If devCtx already holds a CaliptraCmk from a prior SetKey call, delete
+     * the old vault slot and free the heap block before importing the new key. */
+    if (*devctx_ptr != NULL) {
+        (void)wc_caliptra_delete_key((CaliptraCmk*)*devctx_ptr);
+        XFREE(*devctx_ptr, NULL, DYNAMIC_TYPE_TMP_BUFFER);
+        *devctx_ptr = NULL;
+    }
+
+    CALIPTRA_ALLOC(new_cmk, CaliptraCmk);
+    if (new_cmk == NULL) {
+        ret = MEMORY_E;
+        goto cleanup;
+    }
+
+    ret = wc_caliptra_import_key(key_data, key_len, key_usage, new_cmk);
+    if (ret != 0) {
+        CALIPTRA_FREE(new_cmk);
+        goto cleanup;
+    }
+
+    *devctx_ptr = new_cmk;
+
+cleanup:
+    ForceZero(ecc_buf, sizeof(ecc_buf));
+    return ret;
+}
+#endif /* WOLF_CRYPTO_CB_SETKEY */
+
+/* =========================================================================
  * Top-level dispatcher
  * ========================================================================= */
 
@@ -1324,6 +1457,9 @@ int wc_caliptra_cb(int devId, wc_CryptoInfo* info, void* ctx)
         case WC_ALGO_TYPE_HMAC:   return caliptra_hmac(info);
         case WC_ALGO_TYPE_CIPHER: return caliptra_cipher(info);
         case WC_ALGO_TYPE_PK:     return caliptra_pk(info);
+#ifdef WOLF_CRYPTO_CB_SETKEY
+        case WC_ALGO_TYPE_SETKEY: return caliptra_setkey(info);
+#endif
 #ifdef WOLF_CRYPTO_CB_FREE
         case WC_ALGO_TYPE_FREE:
             /* Free any per-object state allocated for streaming operations. */

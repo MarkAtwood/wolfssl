@@ -487,7 +487,148 @@ static void test_hmac_sha384(void)
 }
 
 /* =========================================================================
- * Test 9: AES-GCM authentication failure (tampered tag)
+ * Test 9: AES-GCM via standard wc_AesSetKey (SetKey callback path)
+ *
+ * Same roundtrip as test_aesgcm_roundtrip but uses wc_AesSetKey() instead
+ * of wc_caliptra_import_key() + manual devCtx assignment.  Validates that
+ * caliptra_setkey() auto-imports the key and stores the CaliptraCmk in
+ * aes.devCtx so subsequent GCM operations proceed without any manual
+ * key-management calls.
+ * ========================================================================= */
+#ifdef WOLF_CRYPTO_CB_SETKEY
+static void test_aesgcm_via_setkey(void)
+{
+    static const byte aes_key[32] = {
+        0x60, 0x3d, 0xeb, 0x10, 0x15, 0xca, 0x71, 0xbe,
+        0x2b, 0x73, 0xae, 0xf0, 0x85, 0x7d, 0x77, 0x81,
+        0x1f, 0x35, 0x2c, 0x07, 0x3b, 0x61, 0x08, 0xd7,
+        0x2d, 0x98, 0x10, 0xa3, 0x09, 0x14, 0xdf, 0xf4
+    };
+    static const byte plaintext[] = "Hello, Caliptra! This is a test.";
+    static const byte aad[]       = "additional data";
+
+    byte ciphertext[48];
+    byte decrypted[48];
+    byte enc_tag[16];
+    byte iv_out[12];
+    byte dummy_iv[12];
+    Aes enc_aes, dec_aes;
+    int ret;
+
+    memset(ciphertext, 0, sizeof(ciphertext));
+    memset(decrypted,  0, sizeof(decrypted));
+    memset(enc_tag,    0, sizeof(enc_tag));
+    memset(iv_out,     0, sizeof(iv_out));
+    memset(dummy_iv,   0, sizeof(dummy_iv));
+
+    /* wc_AesSetKey() triggers wc_CryptoCb_SetKey() -> caliptra_setkey()
+     * which imports the key and stores a CaliptraCmk* in enc_aes.devCtx. */
+    ret = wc_AesInit(&enc_aes, NULL, WOLF_CALIPTRA_DEVID);
+    if (ret == 0)
+        ret = wc_AesSetKey(&enc_aes, aes_key, 32, NULL, AES_ENCRYPTION);
+    if (ret == 0)
+        ret = wc_AesGcmEncrypt(&enc_aes,
+                               ciphertext, plaintext, 32,
+                               dummy_iv, 12,
+                               enc_tag, 16,
+                               aad, 15);
+    if (ret == 0)
+        ret = wc_caliptra_aesgcm_get_iv(&enc_aes, iv_out, sizeof(iv_out));
+    /* wc_AesFree calls wc_caliptra_delete_key via devCtx cleanup. */
+    wc_AesFree(&enc_aes);
+
+    if (ret != 0) {
+        TEST("AES-GCM encrypt/decrypt via SetKey callback", 0);
+        return;
+    }
+
+    ret = wc_AesInit(&dec_aes, NULL, WOLF_CALIPTRA_DEVID);
+    if (ret == 0)
+        ret = wc_AesSetKey(&dec_aes, aes_key, 32, NULL, AES_DECRYPTION);
+    if (ret == 0)
+        ret = wc_AesGcmDecrypt(&dec_aes,
+                               decrypted, ciphertext, 32,
+                               iv_out, 12,
+                               enc_tag, 16,
+                               aad, 15);
+    wc_AesFree(&dec_aes);
+
+    TEST("AES-GCM encrypt/decrypt via SetKey callback",
+         ret == 0 && bytes_eq(decrypted, plaintext, 32));
+}
+#endif /* WOLF_CRYPTO_CB_SETKEY */
+
+/* =========================================================================
+ * Test 10: HMAC-SHA-384 via standard wc_HmacSetKey (SetKey callback path)
+ *
+ * Uses wc_HmacSetKey() to auto-import the HMAC key via caliptra_setkey(),
+ * then reads the resulting CaliptraCmk from hmac.devCtx to invoke
+ * wc_caliptra_hmac() directly.  The result is compared to a software
+ * reference to confirm the correct key was imported.
+ * ========================================================================= */
+#ifdef WOLF_CRYPTO_CB_SETKEY
+static void test_hmac_via_setkey(void)
+{
+    static const byte hmac_key[48] = {
+        0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b,
+        0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b,
+        0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b,
+        0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b,
+        0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b,
+        0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b
+    };
+    static const byte msg[] = "data";
+    static const word32 msg_len = 4;
+
+    Hmac   hw_hmac;
+    Hmac   sw_hmac;
+    byte   hw_mac[48];
+    byte   sw_mac[48];
+    word32 hw_mac_len = sizeof(hw_mac);
+    int    ret;
+
+    memset(hw_mac, 0, sizeof(hw_mac));
+    memset(sw_mac, 0, sizeof(sw_mac));
+
+    /* wc_HmacSetKey() triggers wc_CryptoCb_SetKey() -> caliptra_setkey()
+     * which imports the key and stores a CaliptraCmk* in hw_hmac.devCtx.
+     * wc_HmacUpdate/Final with a Caliptra devCtx return WC_HW_E (by design,
+     * to prevent silent software fallback on a keyed object), so we invoke
+     * Caliptra HMAC directly via wc_caliptra_hmac(). */
+    ret = wc_HmacInit(&hw_hmac, NULL, WOLF_CALIPTRA_DEVID);
+    if (ret == 0)
+        ret = wc_HmacSetKey(&hw_hmac, WC_SHA384, hmac_key, 48);
+    if (ret == 0 && hw_hmac.devCtx != NULL)
+        ret = wc_caliptra_hmac((CaliptraCmk*)hw_hmac.devCtx,
+                               WC_SHA384,
+                               msg, msg_len,
+                               hw_mac, &hw_mac_len);
+    else if (ret == 0)
+        ret = -1;  /* devCtx not populated — SetKey callback did not fire */
+    wc_HmacFree(&hw_hmac);
+
+    if (ret != 0) {
+        TEST("HMAC-SHA-384 via SetKey callback matches software", 0);
+        return;
+    }
+
+    /* Software reference */
+    ret = wc_HmacInit(&sw_hmac, NULL, WC_NO_DEVID);
+    if (ret == 0)
+        ret = wc_HmacSetKey(&sw_hmac, WC_SHA384, hmac_key, 48);
+    if (ret == 0)
+        ret = wc_HmacUpdate(&sw_hmac, msg, msg_len);
+    if (ret == 0)
+        ret = wc_HmacFinal(&sw_hmac, sw_mac);
+    wc_HmacFree(&sw_hmac);
+
+    TEST("HMAC-SHA-384 via SetKey callback matches software",
+         ret == 0 && bytes_eq(hw_mac, sw_mac, 48));
+}
+#endif /* WOLF_CRYPTO_CB_SETKEY */
+
+/* =========================================================================
+ * Test 11: AES-GCM authentication failure (tampered tag)
  * ========================================================================= */
 
 static void test_aesgcm_auth_failure(void)
@@ -608,6 +749,10 @@ int main(void)
     test_aesgcm_roundtrip();
     test_ecdsa_sign_verify();
     test_hmac_sha384();
+#ifdef WOLF_CRYPTO_CB_SETKEY
+    test_aesgcm_via_setkey();
+    test_hmac_via_setkey();
+#endif
     test_aesgcm_auth_failure();
 
     printf("\n%d/%d tests passed\n", tests_pass, tests_run);
