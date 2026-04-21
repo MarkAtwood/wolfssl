@@ -11260,6 +11260,51 @@ then
 fi
 
 
+# Linux /dev/crypto2dev CryptoCb port
+AC_ARG_ENABLE([crypto2dev],
+    [AS_HELP_STRING([--enable-crypto2dev],[enable Linux /dev/crypto2dev CryptoCb port; implies --enable-cryptocb (default: disabled)])],
+    [ ENABLED_CRYPTO2DEV=$enableval ],
+    [ ENABLED_CRYPTO2DEV=no ]
+)
+if test "x$ENABLED_CRYPTO2DEV" = "xyes"
+then
+    AM_CFLAGS="$AM_CFLAGS -DWOLFSSL_CRYPTO2DEV"
+    AM_CFLAGS="$AM_CFLAGS -DWOLF_CRYPTO_CB_FREE"
+    AM_CFLAGS="$AM_CFLAGS -DWOLF_CRYPTO_CB_SETKEY"
+    ENABLED_CRYPTOCB=yes
+    AM_CFLAGS="$AM_CFLAGS -DWOLF_CRYPTO_CB"
+fi
+
+# crypto2dev test suite (requires /dev/crypto2dev or simulator)
+AC_ARG_ENABLE([crypto2devtest],
+    [AS_HELP_STRING([--enable-crypto2devtest],[Enable crypto2dev test suite (default: disabled)])],
+    [ ENABLED_CRYPTO2DEVTEST=$enableval ],
+    [ ENABLED_CRYPTO2DEVTEST=no ]
+)
+if test "x$ENABLED_CRYPTO2DEVTEST" = "xyes"
+then
+    if test "x$ENABLED_CRYPTO2DEV" != "xyes"
+    then
+        AC_MSG_ERROR([--enable-crypto2devtest requires --enable-crypto2dev])
+    fi
+    AM_CFLAGS="$AM_CFLAGS -DWOLFSSL_CRYPTO2DEV_TEST"
+fi
+
+# crypto2dev software simulator (standalone testing without hardware)
+AC_ARG_ENABLE([crypto2devsim],
+    [AS_HELP_STRING([--enable-crypto2devsim],[Enable crypto2dev software simulator for testing without hardware (default: disabled)])],
+    [ ENABLED_CRYPTO2DEVSIM=$enableval ],
+    [ ENABLED_CRYPTO2DEVSIM=no ]
+)
+if test "x$ENABLED_CRYPTO2DEVSIM" = "xyes"
+then
+    if test "x$ENABLED_CRYPTO2DEV" != "xyes"
+    then
+        AC_MSG_ERROR([--enable-crypto2devsim requires --enable-crypto2dev])
+    fi
+    AM_CFLAGS="$AM_CFLAGS -DWOLFSSL_CRYPTO2DEV_SIM"
+fi
+
 # Session Export
 AC_ARG_ENABLE([sessionexport],
     [AS_HELP_STRING([--enable-sessionexport],[Enable export and import of sessions (default: disabled)])],
@@ -12914,6 +12959,9 @@ AM_CONDITIONAL([BUILD_MAXQ10XX],[test "x$ENABLED_MAXQ10XX" = "xyes"])
 AM_CONDITIONAL([BUILD_ARIA],[test "x$ENABLED_ARIA" = "xyes"])
 AM_CONDITIONAL([BUILD_XILINX],[test "x$ENABLED_XILINX" = "xyes"])
 AM_CONDITIONAL([BUILD_AUTOSAR],[test "x$ENABLED_AUTOSAR" = "xyes"])
+AM_CONDITIONAL([BUILD_CRYPTO2DEV],[test "x$ENABLED_CRYPTO2DEV" = "xyes"])
+AM_CONDITIONAL([BUILD_CRYPTO2DEVTEST],[test "x$ENABLED_CRYPTO2DEVTEST" = "xyes"])
+AM_CONDITIONAL([BUILD_CRYPTO2DEVSIM],[test "x$ENABLED_CRYPTO2DEVSIM" = "xyes"])
 
 if test "$ENABLED_REPRODUCIBLE_BUILD" != "yes" &&
    (test "$ax_enable_debug" = "yes" ||
@@ -13514,6 +13562,9 @@ echo "   * ERR Queues per Thread:      $ENABLED_ERRORQUEUEPERTHREAD"
 echo "   * rwlock:                     $ENABLED_RWLOCK"
 echo "   * keylog export:              $ENABLED_KEYLOG_EXPORT"
 echo "   * AutoSAR :                   $ENABLED_AUTOSAR"
+echo "   * crypto2dev port:            $ENABLED_CRYPTO2DEV"
+echo "   * crypto2dev test:            $ENABLED_CRYPTO2DEVTEST"
+echo "   * crypto2dev sim:             $ENABLED_CRYPTO2DEVSIM"
 echo "   * ML-KEM  standalone:         $ENABLED_MLKEM_STANDALONE"
 echo "   * PQ/T hybrids:               $ENABLED_PQC_HYBRIDS"
 echo "   * Extra PQ/T hybrids:         $ENABLED_EXTRA_PQC_HYBRIDS"

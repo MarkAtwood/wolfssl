@@ -479,6 +479,9 @@ static const byte const_byte_array[] = "A+Gd\0\0\0";
     #ifdef WOLFSSL_RTL8735B_HOST_TEST
         #include <wolfssl/wolfcrypt/port/realtek/rtl8735b.h>
     #endif
+    #if defined(WOLFSSL_CRYPTO2DEV) && defined(WOLFSSL_CRYPTO2DEV_TEST)
+        #include <wolfssl/wolfcrypt/port/crypto2dev/crypto2dev_port.h>
+    #endif
 #endif
 
 #ifdef _MSC_VER
@@ -1106,6 +1109,9 @@ WOLFSSL_TEST_SUBROUTINE int ariagcm_test(MC_ALGID);
 
 #if defined(WOLF_CRYPTO_CB) && !defined(WC_TEST_NO_CRYPTOCB_SW_TEST)
 WOLFSSL_TEST_SUBROUTINE wc_test_ret_t cryptocb_test(void);
+#endif
+#if defined(WOLFSSL_CRYPTO2DEV) && defined(WOLF_CRYPTO_CB) && defined(WOLFSSL_CRYPTO2DEV_TEST)
+WOLFSSL_TEST_SUBROUTINE int wc_crypto2dev_test(void);
 #endif
 #ifdef WOLFSSL_CERT_PIV
 WOLFSSL_TEST_SUBROUTINE wc_test_ret_t certpiv_test(void);
@@ -3414,6 +3420,13 @@ options: [-s max_relative_stack_bytes] [-m max_relative_heap_memory_bytes]\n\
         TEST_FAIL("RTL8735B HUK self-test failed!\n", ret);
     else
         TEST_PASS("RTL8735B HUK self-test passed!\n");
+#endif
+
+#if defined(WOLFSSL_CRYPTO2DEV) && defined(WOLF_CRYPTO_CB) && defined(WOLFSSL_CRYPTO2DEV_TEST)
+    if ( (ret = wc_crypto2dev_test()) != 0)
+        TEST_FAIL("crypto2dev test failed!\n", ret);
+    else
+        TEST_PASS("crypto2dev test passed!\n");
 #endif
 
 #ifdef WOLFSSL_CERT_PIV

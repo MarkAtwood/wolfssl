@@ -283,3 +283,16 @@ EXTRA_DIST += wolfcrypt/src/port/maxim/README.md
 
 include wolfcrypt/src/port/autosar/include.am
 
+if BUILD_CRYPTO2DEV
+src_libwolfssl@LIBSUFFIX@_la_SOURCES += wolfcrypt/src/port/crypto2dev/crypto2dev_port.c
+if BUILD_CRYPTO2DEVSIM
+src_libwolfssl@LIBSUFFIX@_la_SOURCES += wolfcrypt/src/port/crypto2dev/crypto2dev_sim.c
+endif
+if BUILD_CRYPTO2DEVTEST
+src_libwolfssl@LIBSUFFIX@_la_SOURCES += wolfcrypt/src/port/crypto2dev/crypto2dev_test.c
+endif
+endif
+EXTRA_DIST += wolfcrypt/src/port/crypto2dev/crypto2dev_port.c \
+              wolfcrypt/src/port/crypto2dev/crypto2dev_sim.c \
+              wolfcrypt/src/port/crypto2dev/crypto2dev_test.c
+
