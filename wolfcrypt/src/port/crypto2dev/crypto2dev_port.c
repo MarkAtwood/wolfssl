@@ -1666,6 +1666,127 @@ int wc_crypto2dev_cleanup(void)
     return 0;
 }
 
+int wc_crypto2dev_pool_stats(int* out_in_use, int* out_total)
+{
+    int i;
+    int used = 0;
+
+    if (out_in_use == NULL || out_total == NULL)
+        return BAD_FUNC_ARG;
+
+    if (!g_pool_inited || g_pool.slots == NULL) {
+        *out_in_use = 0;
+        *out_total  = 0;
+        return 0;
+    }
+
+    if (wc_LockMutex(&g_pool.lock) != 0)
+        return WC_HW_E;
+    for (i = 0; i < g_pool.capacity; i++) {
+        if (g_pool.slots[i].in_use)
+            used++;
+    }
+    wc_UnLockMutex(&g_pool.lock);
+
+    *out_in_use = used;
+    *out_total  = g_pool.capacity;
+    return 0;
+}
+
+int wc_crypto2dev_selftest(void)
+{
+    /* Arbitrary stable test data — not secret; software path is the oracle.
+     * wolfSSL software AES-GCM (INVALID_DEVID) and the hardware device are
+     * independent implementations: if they agree, the device is alive. */
+    static const byte key[AES_128_KEY_SIZE] = {
+        0x01,0x01,0x01,0x01, 0x01,0x01,0x01,0x01,
+        0x01,0x01,0x01,0x01, 0x01,0x01,0x01,0x01
+    };
+    static const byte iv[GCM_NONCE_MID_SZ] = {
+        0x02,0x02,0x02,0x02, 0x02,0x02,0x02,0x02,
+        0x02,0x02,0x02,0x02
+    };
+    static const byte pt[AES_BLOCK_SIZE] = {
+        0x03,0x03,0x03,0x03, 0x03,0x03,0x03,0x03,
+        0x03,0x03,0x03,0x03, 0x03,0x03,0x03,0x03
+    };
+    static const byte aad[AES_BLOCK_SIZE] = {
+        0x04,0x04,0x04,0x04, 0x04,0x04,0x04,0x04,
+        0x04,0x04,0x04,0x04, 0x04,0x04,0x04,0x04
+    };
+    byte ct_sw [AES_BLOCK_SIZE], tag_sw [AES_BLOCK_SIZE];
+    byte ct_hw [AES_BLOCK_SIZE], tag_hw [AES_BLOCK_SIZE];
+    byte pt_out[AES_BLOCK_SIZE];
+    Aes  aes;
+    int  ret;
+
+    if (!g_pool_inited || g_pool.slots == NULL) {
+        WOLFSSL_MSG("crypto2dev: selftest called before wc_crypto2dev_init()");
+        return WC_HW_E;
+    }
+
+    /* Software oracle: encrypt with INVALID_DEVID (pure software AES-GCM). */
+    ret = wc_AesInit(&aes, NULL, INVALID_DEVID);
+    if (ret != 0)
+        return ret;
+    ret = wc_AesGcmSetKey(&aes, key, sizeof(key));
+    if (ret == 0)
+        ret = wc_AesGcmEncrypt(&aes, ct_sw, pt, sizeof(pt),
+                                iv, sizeof(iv),
+                                tag_sw, sizeof(tag_sw),
+                                aad, sizeof(aad));
+    wc_AesFree(&aes);
+    if (ret != 0) {
+        WOLFSSL_MSG("crypto2dev: selftest software oracle failed");
+        return WC_HW_E;
+    }
+
+    /* Hardware encrypt. */
+    ret = wc_AesInit(&aes, NULL, WOLF_CRYPTO2DEV_DEVID);
+    if (ret != 0) goto cleanup;
+    ret = wc_AesGcmSetKey(&aes, key, sizeof(key));
+    if (ret == 0)
+        ret = wc_AesGcmEncrypt(&aes, ct_hw, pt, sizeof(pt),
+                                iv, sizeof(iv),
+                                tag_hw, sizeof(tag_hw),
+                                aad, sizeof(aad));
+    wc_AesFree(&aes);
+    if (ret != 0) goto cleanup;
+
+    if (XMEMCMP(ct_hw,  ct_sw,  sizeof(ct_sw))  != 0 ||
+        XMEMCMP(tag_hw, tag_sw, sizeof(tag_sw)) != 0) {
+        WOLFSSL_MSG("crypto2dev: selftest encrypt mismatch — "
+                    "hardware result differs from software oracle");
+        ret = WC_HW_E;
+        goto cleanup;
+    }
+
+    /* Hardware decrypt: verify the round-trip. */
+    ret = wc_AesInit(&aes, NULL, WOLF_CRYPTO2DEV_DEVID);
+    if (ret != 0) goto cleanup;
+    ret = wc_AesGcmSetKey(&aes, key, sizeof(key));
+    if (ret == 0)
+        ret = wc_AesGcmDecrypt(&aes, pt_out, ct_hw, sizeof(ct_hw),
+                                iv, sizeof(iv),
+                                tag_hw, sizeof(tag_hw),
+                                aad, sizeof(aad));
+    wc_AesFree(&aes);
+    if (ret != 0) goto cleanup;
+
+    if (XMEMCMP(pt_out, pt, sizeof(pt)) != 0) {
+        WOLFSSL_MSG("crypto2dev: selftest decrypt mismatch");
+        ret = WC_HW_E;
+    }
+
+cleanup:
+    ForceZero(ct_sw,  sizeof(ct_sw));
+    ForceZero(tag_sw, sizeof(tag_sw));
+    ForceZero(ct_hw,  sizeof(ct_hw));
+    ForceZero(tag_hw, sizeof(tag_hw));
+    ForceZero(pt_out, sizeof(pt_out));
+    return ret;
+}
+
 int wc_crypto2dev_cb(int devId, wc_CryptoInfo* info, void* ctx)
 {
     Crypto2DevConfig* cfg = (Crypto2DevConfig*)ctx;

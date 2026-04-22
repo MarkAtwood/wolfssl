@@ -1755,6 +1755,54 @@ ecdsa_pool_done:
 #endif /* HAVE_ECC && WOLF_CRYPTO_CB_SETKEY */
 
 /* ------------------------------------------------------------------ */
+/* Test: wc_crypto2dev_pool_stats                                       */
+/* ------------------------------------------------------------------ */
+static int test_pool_stats(void)
+{
+    int in_use = -1, total = -1;
+    int ret;
+
+    ret = wc_crypto2dev_pool_stats(NULL, &total);
+    if (ret != BAD_FUNC_ARG) {
+        WOLFSSL_MSG("crypto2dev_test: pool_stats(NULL, &total) should be BAD_FUNC_ARG");
+        return -1;
+    }
+    ret = wc_crypto2dev_pool_stats(&in_use, NULL);
+    if (ret != BAD_FUNC_ARG) {
+        WOLFSSL_MSG("crypto2dev_test: pool_stats(&in_use, NULL) should be BAD_FUNC_ARG");
+        return -1;
+    }
+
+    ret = wc_crypto2dev_pool_stats(&in_use, &total);
+    if (ret != 0) {
+        WOLFSSL_MSG("crypto2dev_test: pool_stats failed");
+        return ret;
+    }
+    if (total <= 0 || in_use < 0 || in_use > total) {
+        WOLFSSL_MSG("crypto2dev_test: pool_stats returned implausible values");
+        return -1;
+    }
+    WOLFSSL_MSG("crypto2dev_test: pool_stats passed");
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Test: wc_crypto2dev_selftest                                         */
+/* ------------------------------------------------------------------ */
+#ifdef HAVE_AESGCM
+static int test_selftest(void)
+{
+    int ret = wc_crypto2dev_selftest();
+    if (ret != 0) {
+        WOLFSSL_MSG("crypto2dev_test: selftest FAILED");
+        return ret;
+    }
+    WOLFSSL_MSG("crypto2dev_test: selftest passed");
+    return 0;
+}
+#endif /* HAVE_AESGCM */
+
+/* ------------------------------------------------------------------ */
 /* Public entry point                                                   */
 /* ------------------------------------------------------------------ */
 
@@ -1822,6 +1870,20 @@ int wc_crypto2dev_test(void)
         WOLFSSL_MSG("crypto2dev_test: HMAC lifecycle FAILED");
         goto done;
     }
+
+    ret = test_pool_stats();
+    if (ret != 0) {
+        WOLFSSL_MSG("crypto2dev_test: pool_stats FAILED");
+        goto done;
+    }
+
+#ifdef HAVE_AESGCM
+    ret = test_selftest();
+    if (ret != 0) {
+        WOLFSSL_MSG("crypto2dev_test: selftest FAILED");
+        goto done;
+    }
+#endif
 
 #ifdef HAVE_AESGCM
     ret = test_aesgcm_empty();

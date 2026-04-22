@@ -79,6 +79,26 @@ WOLFSSL_API int wc_crypto2dev_init(int pool_size);
 WOLFSSL_API int wc_crypto2dev_cleanup(void);
 WOLFSSL_API int wc_crypto2dev_cb(int devId, wc_CryptoInfo* info, void* ctx);
 
+/* Pool utilization: fills *out_in_use with the number of slots currently
+ * leased to active operations, and *out_total with the pool capacity.
+ * Returns 0 on success, BAD_FUNC_ARG if either pointer is NULL, WC_HW_E
+ * if the pool mutex cannot be acquired.  Both outputs are 0 if the pool
+ * has not been initialized.  Thread-safe; takes the pool lock briefly. */
+WOLFSSL_API int wc_crypto2dev_pool_stats(int* out_in_use, int* out_total);
+
+/* Device liveness check: runs an AES-128-GCM encrypt/decrypt round-trip
+ * against WOLF_CRYPTO2DEV_DEVID and cross-validates against the wolfSSL
+ * software path (INVALID_DEVID).  Returns 0 if the device produces the
+ * same result as software; WC_HW_E if the device is unavailable, returns
+ * wrong output, or wc_crypto2dev_init() has not been called.
+ *
+ * Requires WOLF_CRYPTO2DEV_DEVID to be registered.  Call after a WC_HW_E
+ * to distinguish a device failure from a transient pool-exhaustion event
+ * (wc_crypto2dev_pool_stats will show available slots in the latter case).
+ *
+ * Not suitable as a FIPS power-on self-test — use a certified POST. */
+WOLFSSL_API int wc_crypto2dev_selftest(void);
+
 /* Register wc_crypto2dev_cb under WOLF_CRYPTO2DEV_DEVID WITHOUT enabling
  * TLS-safe mode.  wc_crypto2dev_cleanup() unregisters automatically.
  * Use for non-TLS bulk-data contexts where hardware hash is desired.
