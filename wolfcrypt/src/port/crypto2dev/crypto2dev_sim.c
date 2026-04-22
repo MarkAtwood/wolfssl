@@ -30,7 +30,7 @@
  * collide with real fds the process may hold.
  *
  * Supported operations:
- *   OPERATION fds: sha256, sha384, sha512 hashing; cbc(aes) / gcm(aes) cipher
+ *   OPERATION fds: sha256, sha384, sha512 hashing; cbc(aes) / gcm(aes) / ctr(aes) cipher
  *   KEY fds:       raw key import; ECDSA P-256 sign/verify
  *   HMAC:          hmac(sha256) / hmac(sha384) / hmac(sha512)
  */
@@ -43,7 +43,9 @@
 #if defined(WOLFSSL_CRYPTO2DEV) && defined(WOLF_CRYPTO_CB) && \
     defined(WOLFSSL_CRYPTO2DEV_SIM)
 
-/* Include system headers BEFORE the sim macros so we get real prototypes. */
+/* Include system headers BEFORE the wire/sim headers so we get real
+ * prototypes.  crypto2dev_wire.h also includes <sys/ioctl.h> but listing
+ * it here first is harmless and makes the dependency explicit. */
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
@@ -62,6 +64,11 @@
 #include <wolfssl/wolfcrypt/ecc.h>
 #include <wolfssl/wolfcrypt/random.h>
 
+/* Wire structs and ioctl request codes — shared with crypto2dev_port.c via
+ * this header.  Both files compute _IOW/_IOR from the same struct definitions,
+ * guaranteeing that ioctl request codes match on both sides. */
+#include <wolfssl/wolfcrypt/port/crypto2dev/crypto2dev_wire.h>
+
 /* Must come last — redefines open/close/read/write/ioctl. */
 #include <wolfssl/wolfcrypt/port/crypto2dev/crypto2dev_sim.h>
 
@@ -70,136 +77,20 @@
        "the simulator does not implement the REQUIRE_FIPS ioctl."
 #endif
 
-/* ioctl request codes — keep in sync with crypto2dev_port.c */
-#ifndef CRYPTO2DEV_IOC_MAGIC
-#define CRYPTO2DEV_IOC_MAGIC         ((unsigned char)0xC2)
-#endif
-#ifndef CRYPTO2DEV_ALGO_MAXLEN
-#define CRYPTO2DEV_ALGO_MAXLEN       32
-#endif
-#ifndef CRYPTO2DEV_PROVIDER_MAXLEN
-#define CRYPTO2DEV_PROVIDER_MAXLEN   32
-#endif
-#ifndef CRYPTO2DEV_KEY_PRIVATE
-#define CRYPTO2DEV_KEY_PRIVATE       1
-#define CRYPTO2DEV_KEY_PUBLIC        2
-#define CRYPTO2DEV_KEY_PAIR          3
-#define CRYPTO2DEV_KEY_SYMMETRIC     4
-#endif
-#ifndef CRYPTO2DEV_KEY_IMPORT_MAXLEN
-#define CRYPTO2DEV_KEY_IMPORT_MAXLEN 8192
-#endif
-#ifndef CRYPTO2DEV_KEY_MAXLEN
-#define CRYPTO2DEV_KEY_MAXLEN          128
-#endif
-#ifndef CRYPTO2DEV_IV_MAXLEN
-#define CRYPTO2DEV_IV_MAXLEN           32
-#endif
-#ifndef CRYPTO2DEV_AAD_MAXLEN
-#define CRYPTO2DEV_AAD_MAXLEN          256
-#endif
-#ifndef CRYPTO2DEV_TAG_MAXLEN
-#define CRYPTO2DEV_TAG_MAXLEN          16
-#endif
-#ifndef CRYPTO2DEV_HASH_MAXLEN
-#define CRYPTO2DEV_HASH_MAXLEN         64
-#endif
-#ifndef CRYPTO2DEV_SIG_MAXLEN
-#define CRYPTO2DEV_SIG_MAXLEN          512
-#endif
-#ifndef CRYPTO2DEV_PUBKEY_MAXLEN
-#define CRYPTO2DEV_PUBKEY_MAXLEN       256
-#endif
-#ifndef CRYPTO2DEV_OP_ENCRYPT
-#define CRYPTO2DEV_OP_ENCRYPT          1
-#define CRYPTO2DEV_OP_DECRYPT          2
-#define CRYPTO2DEV_OP_HASH             3
-#endif
-
-#ifndef CRYPTO2DEV_IOC_INIT
-#define CRYPTO2DEV_IOC_INIT     _IOW(CRYPTO2DEV_IOC_MAGIC, 1,  struct crypto2dev_sim_init_op)
-#define CRYPTO2DEV_IOC_SET_IV   _IOW(CRYPTO2DEV_IOC_MAGIC, 2,  struct crypto2dev_sim_iv_op)
-#define CRYPTO2DEV_IOC_SET_AAD  _IOW(CRYPTO2DEV_IOC_MAGIC, 3,  struct crypto2dev_sim_aad_op)
-#define CRYPTO2DEV_IOC_GET_TAG  _IOR(CRYPTO2DEV_IOC_MAGIC, 4,  struct crypto2dev_sim_tag_op)
-#define CRYPTO2DEV_IOC_SET_TAG  _IOW(CRYPTO2DEV_IOC_MAGIC, 5,  struct crypto2dev_sim_tag_op)
-#define CRYPTO2DEV_IOC_RESET    _IO( CRYPTO2DEV_IOC_MAGIC, 19)
-#define CRYPTO2DEV_IOC_FINALIZE _IO( CRYPTO2DEV_IOC_MAGIC, 21)
-#endif
-#ifndef CRYPTO2DEV_IOC_KEY_GENERATE
-#define CRYPTO2DEV_IOC_DO_SIGN   _IOWR(CRYPTO2DEV_IOC_MAGIC, 16, struct crypto2dev_sim_sign_op)
-#define CRYPTO2DEV_IOC_DO_VERIFY _IOWR(CRYPTO2DEV_IOC_MAGIC, 17, struct crypto2dev_sim_verify_op)
-#endif
-#ifndef CRYPTO2DEV_IOC_KEY_IMPORT
-#define CRYPTO2DEV_IOC_KEY_IMPORT  _IOW(CRYPTO2DEV_IOC_MAGIC, 11, \
-                                        struct crypto2dev_sim_key_import_op)
-#endif
-
-/* Struct mirrors — the sim uses the same wire layout as the port. */
-struct crypto2dev_sim_init_op {
-    char          algo    [CRYPTO2DEV_ALGO_MAXLEN];
-    char          provider[CRYPTO2DEV_PROVIDER_MAXLEN];
-    unsigned int  op;
-    unsigned int  keylen;
-    unsigned char key[CRYPTO2DEV_KEY_MAXLEN];
-    int           key_fd;
-    unsigned char _pad[4];
-};
-struct crypto2dev_sim_iv_op {
-    unsigned char iv[CRYPTO2DEV_IV_MAXLEN];
-    unsigned int  ivlen;
-};
-struct crypto2dev_sim_aad_op {
-    unsigned char aad[CRYPTO2DEV_AAD_MAXLEN];
-    unsigned int  aadlen;
-};
-struct crypto2dev_sim_tag_op {
-    unsigned char tag[CRYPTO2DEV_TAG_MAXLEN];
-    unsigned int  taglen;
-};
-struct crypto2dev_sim_sign_op {
-    int           key_fd;
-    unsigned char _pad[4];
-    char          hash_algo[CRYPTO2DEV_ALGO_MAXLEN];
-    unsigned int  digest_len;
-    unsigned char digest[CRYPTO2DEV_HASH_MAXLEN];
-    unsigned int  sig_len;
-    unsigned char sig[CRYPTO2DEV_SIG_MAXLEN];
-};
-struct crypto2dev_sim_verify_op {
-    int           key_fd;
-    unsigned char _pad[4];
-    char          hash_algo[CRYPTO2DEV_ALGO_MAXLEN];
-    unsigned int  digest_len;
-    unsigned char digest[CRYPTO2DEV_HASH_MAXLEN];
-    unsigned int  sig_len;
-    unsigned char sig[CRYPTO2DEV_SIG_MAXLEN];
-};
-struct crypto2dev_sim_key_import_op {
-    char  algo    [CRYPTO2DEV_ALGO_MAXLEN];
-    char  provider[CRYPTO2DEV_PROVIDER_MAXLEN];
-    unsigned int key_type;
-    unsigned int exportable;
-    unsigned int keylen;
-    unsigned char _pad[4];
-};
-
-/* Compile-time struct parity check.
- * The sim re-declares each struct with a "sim_" prefix but uses the same
- * field layout and CRYPTO2DEV_*_MAXLEN constants as the port.  The _IOW/_IOR
- * macros encode sizeof(struct) into the ioctl request code; a size divergence
- * causes all ioctls to silently misfire.
- *
- * Struct parity is maintained by sharing the same CRYPTO2DEV_*_MAXLEN
- * constants defined above.  The assertion below checks the one pair of structs
- * that must remain equal to each other (sign and verify have identical wire
- * layout). */
-wc_static_assert2(sizeof(struct crypto2dev_sim_sign_op) ==
-                  sizeof(struct crypto2dev_sim_verify_op),
-    "sim sign_op and verify_op must be the same size");
+/* Verify that sign_op and verify_op have identical wire layout (they share
+ * the same field set and the sim ioctl dispatch casts between them). */
+wc_static_assert2(sizeof(struct crypto2dev_sign_op) ==
+                  sizeof(struct crypto2dev_verify_op),
+    "sign_op and verify_op must be the same size");
 
 /* ---------------------------------------------------------------------- */
 /* Slot table                                                               */
 /* ---------------------------------------------------------------------- */
+
+/* SIM_MAX_DATA: maximum bytes per in_buf / out_buf in SimFdSlot.
+ * This is a simulator constraint (each slot is SIM_MAX_DATA*2 bytes of stack
+ * memory) — the wire protocol itself has no fixed data-size limit. */
+#define SIM_MAX_DATA  65536
 
 #define MAX_SIM_FDS   16
 #define SIM_FD_BASE   1000  /* simulated fds start here to avoid real-fd collisions */
@@ -208,7 +99,9 @@ wc_static_assert2(sizeof(struct crypto2dev_sim_sign_op) ==
 #define SIM_FD_OPERATION  1
 #define SIM_FD_KEY        2
 
-/* Hash algorithm sub-type for the operation fd. */
+/* Hash algorithm sub-type for the operation fd.
+ * SIM_HASH_HMAC is a distinct sub-type so that sim_finalize can dispatch
+ * explicitly rather than relying on the implicit keySz>0 heuristic. */
 #define SIM_HASH_NONE      0
 #define SIM_HASH_SHA256    1
 #define SIM_HASH_SHA384    2
@@ -216,11 +109,13 @@ wc_static_assert2(sizeof(struct crypto2dev_sim_sign_op) ==
 #define SIM_HASH_SHA3_256  4
 #define SIM_HASH_SHA3_384  5
 #define SIM_HASH_SHA3_512  6
+#define SIM_HASH_HMAC      7
 
 /* Cipher algorithm sub-type for the operation fd. */
 #define SIM_CIPHER_NONE  0
 #define SIM_CIPHER_CBC   1
 #define SIM_CIPHER_GCM   2
+#define SIM_CIPHER_CTR   3
 
 typedef struct {
     int    used;
@@ -243,11 +138,11 @@ typedef struct {
     word32 aadSz;
 
     /* Accumulated input buffer */
-    byte   in_buf[65536];
+    byte   in_buf[SIM_MAX_DATA];
     word32 in_len;
 
     /* Computed output */
-    byte   out_buf[65536];
+    byte   out_buf[SIM_MAX_DATA];
     word32 out_len;
     word32 out_pos;   /* read cursor */
     int    finalized;
@@ -273,6 +168,15 @@ typedef struct {
 
 static SimFdSlot g_sim_slots[MAX_SIM_FDS];
 static int       g_sim_inited = 0;
+
+/* Fault injection: when > 0, the next N calls to crypto2dev_sim_ioctl
+ * return -1 with errno=ENODEV.  Single-threaded test use only. */
+static int g_sim_ioctl_fail_count = 0;
+
+void crypto2dev_sim_set_ioctl_fail(int count)
+{
+    g_sim_ioctl_fail_count = count;
+}
 
 static void sim_ensure_init(void)
 {
@@ -509,6 +413,29 @@ static int sim_finalize_cipher_gcm(SimFdSlot* slot)
     return ret;
 }
 
+#ifdef WOLFSSL_AES_COUNTER
+static int sim_finalize_cipher_ctr(SimFdSlot* slot)
+{
+    Aes aes;
+    int ret;
+
+    if (slot->keySz == 0 || slot->ivSz == 0)
+        return -1;
+
+    ret = wc_AesInit(&aes, NULL, INVALID_DEVID);
+    if (ret != 0) return ret;
+
+    /* CTR mode: encrypt and decrypt are the same operation. */
+    ret = wc_AesSetKey(&aes, slot->key, slot->keySz, slot->iv, AES_ENCRYPTION);
+    if (ret == 0)
+        ret = wc_AesCtrEncrypt(&aes, slot->out_buf, slot->in_buf, slot->in_len);
+    wc_AesFree(&aes);
+    if (ret != 0) return ret;
+    slot->out_len = slot->in_len;
+    return 0;
+}
+#endif /* WOLFSSL_AES_COUNTER */
+
 static int sim_finalize(SimFdSlot* slot)
 {
     if (slot->finalized)
@@ -516,7 +443,7 @@ static int sim_finalize(SimFdSlot* slot)
 
     if (slot->op == CRYPTO2DEV_OP_HASH) {
         int ret;
-        if (slot->keySz > 0)
+        if (slot->hash_type == SIM_HASH_HMAC)
             ret = sim_finalize_hmac(slot);
         else
             ret = sim_finalize_hash(slot);
@@ -527,6 +454,10 @@ static int sim_finalize(SimFdSlot* slot)
             ret = sim_finalize_cipher_cbc(slot);
         else if (slot->cipher_type == SIM_CIPHER_GCM)
             ret = sim_finalize_cipher_gcm(slot);
+#ifdef WOLFSSL_AES_COUNTER
+        else if (slot->cipher_type == SIM_CIPHER_CTR)
+            ret = sim_finalize_cipher_ctr(slot);
+#endif
         else
             return -1;
         if (ret != 0) return ret;
@@ -638,7 +569,7 @@ ssize_t crypto2dev_sim_read(int fd, void* buf, size_t count)
 
 static int sim_ioctl_init(SimFdSlot* slot, void* arg)
 {
-    struct crypto2dev_sim_init_op* op = (struct crypto2dev_sim_init_op*)arg;
+    struct crypto2dev_init_op* op = (struct crypto2dev_init_op*)arg;
 
     if (op == NULL)
         return -1;
@@ -686,8 +617,13 @@ static int sim_ioctl_init(SimFdSlot* slot, void* arg)
         slot->cipher_type = SIM_CIPHER_CBC;
     else if (XSTRNCMP(op->algo, "gcm(aes)", CRYPTO2DEV_ALGO_MAXLEN) == 0)
         slot->cipher_type = SIM_CIPHER_GCM;
-    /* HMAC: hash_type stays NONE; keySz > 0 distinguishes HMAC from plain hash */
-    else if (XSTRNCMP(op->algo, "hmac(", 5) != 0) {
+#ifdef WOLFSSL_AES_COUNTER
+    else if (XSTRNCMP(op->algo, "ctr(aes)", CRYPTO2DEV_ALGO_MAXLEN) == 0)
+        slot->cipher_type = SIM_CIPHER_CTR;
+#endif
+    else if (XSTRNCMP(op->algo, "hmac(", 5) == 0)
+        slot->hash_type = SIM_HASH_HMAC;
+    else {
         /* Unrecognized algo — signal to the port to fall back to software. */
         errno = EOPNOTSUPP;
         return -1;
@@ -698,7 +634,7 @@ static int sim_ioctl_init(SimFdSlot* slot, void* arg)
 
 static int sim_ioctl_set_iv(SimFdSlot* slot, void* arg)
 {
-    struct crypto2dev_sim_iv_op* op = (struct crypto2dev_sim_iv_op*)arg;
+    struct crypto2dev_iv_op* op = (struct crypto2dev_iv_op*)arg;
     if (op == NULL || op->ivlen > sizeof(slot->iv))
         return -1;
     XMEMCPY(slot->iv, op->iv, op->ivlen);
@@ -708,7 +644,7 @@ static int sim_ioctl_set_iv(SimFdSlot* slot, void* arg)
 
 static int sim_ioctl_set_aad(SimFdSlot* slot, void* arg)
 {
-    struct crypto2dev_sim_aad_op* op = (struct crypto2dev_sim_aad_op*)arg;
+    struct crypto2dev_aad_op* op = (struct crypto2dev_aad_op*)arg;
     if (op == NULL || op->aadlen > sizeof(slot->aad))
         return -1;
     XMEMCPY(slot->aad, op->aad, op->aadlen);
@@ -718,7 +654,7 @@ static int sim_ioctl_set_aad(SimFdSlot* slot, void* arg)
 
 static int sim_ioctl_get_tag(SimFdSlot* slot, void* arg)
 {
-    struct crypto2dev_sim_tag_op* op = (struct crypto2dev_sim_tag_op*)arg;
+    struct crypto2dev_tag_op* op = (struct crypto2dev_tag_op*)arg;
     if (op == NULL)
         return -1;
     if (!slot->finalized || slot->tagSz == 0) {
@@ -733,7 +669,7 @@ static int sim_ioctl_get_tag(SimFdSlot* slot, void* arg)
 
 static int sim_ioctl_set_tag(SimFdSlot* slot, void* arg)
 {
-    struct crypto2dev_sim_tag_op* op = (struct crypto2dev_sim_tag_op*)arg;
+    struct crypto2dev_tag_op* op = (struct crypto2dev_tag_op*)arg;
     if (op == NULL || op->taglen > sizeof(slot->expected_tag))
         return -1;
     XMEMCPY(slot->expected_tag, op->tag, op->taglen);
@@ -743,8 +679,8 @@ static int sim_ioctl_set_tag(SimFdSlot* slot, void* arg)
 
 static int sim_ioctl_key_import(SimFdSlot* slot, void* arg)
 {
-    struct crypto2dev_sim_key_import_op* op =
-        (struct crypto2dev_sim_key_import_op*)arg;
+    struct crypto2dev_key_import_op* op =
+        (struct crypto2dev_key_import_op*)arg;
     int ret;
 
     if (op == NULL)
@@ -789,7 +725,7 @@ static int sim_ioctl_key_import(SimFdSlot* slot, void* arg)
 #ifdef HAVE_ECC
 static int sim_ioctl_do_sign(int key_fd, void* arg)
 {
-    struct crypto2dev_sim_sign_op* op = (struct crypto2dev_sim_sign_op*)arg;
+    struct crypto2dev_sign_op* op = (struct crypto2dev_sign_op*)arg;
     SimFdSlot* kslot;
     WC_RNG rng;
     int ret;
@@ -814,7 +750,7 @@ static int sim_ioctl_do_sign(int key_fd, void* arg)
 
 static int sim_ioctl_do_verify(int key_fd, void* arg)
 {
-    struct crypto2dev_sim_verify_op* op = (struct crypto2dev_sim_verify_op*)arg;
+    struct crypto2dev_verify_op* op = (struct crypto2dev_verify_op*)arg;
     SimFdSlot* kslot;
     int stat = 0;
     int ret;
@@ -851,18 +787,26 @@ static int sim_ioctl_do_verify(int key_fd, void* arg)
 
 int crypto2dev_sim_ioctl(int fd, unsigned long request, void* arg)
 {
-    SimFdSlot* slot = sim_slot(fd);
+    SimFdSlot* slot;
+
+    if (g_sim_ioctl_fail_count > 0) {
+        g_sim_ioctl_fail_count--;
+        errno = ENODEV;
+        return -1;
+    }
+
+    slot = sim_slot(fd);
 
     /* DO_SIGN and DO_VERIFY carry the key_fd as a simulated fd value.
      * They may be issued on any open sim fd (typically the global device fd). */
     if (request == CRYPTO2DEV_IOC_DO_SIGN) {
-        struct crypto2dev_sim_sign_op* op = (struct crypto2dev_sim_sign_op*)arg;
+        struct crypto2dev_sign_op* op = (struct crypto2dev_sign_op*)arg;
         if (op == NULL) { errno = EINVAL; return -1; }
         return sim_ioctl_do_sign(op->key_fd, arg);
     }
     if (request == CRYPTO2DEV_IOC_DO_VERIFY) {
-        struct crypto2dev_sim_verify_op* op =
-            (struct crypto2dev_sim_verify_op*)arg;
+        struct crypto2dev_verify_op* op =
+            (struct crypto2dev_verify_op*)arg;
         if (op == NULL) { errno = EINVAL; return -1; }
         return sim_ioctl_do_verify(op->key_fd, arg);
     }

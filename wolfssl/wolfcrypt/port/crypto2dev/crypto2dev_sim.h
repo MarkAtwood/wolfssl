@@ -37,6 +37,18 @@
  * ioctl() is defined as a 3-argument macro.  All call sites in the port must
  * pass a third argument; use NULL for requests that carry no data pointer
  * (e.g., FINALIZE, RESET, REQUIRE_FIPS).
+ *
+ * WARNING — open() macro limitation:
+ * The open() macro accepts exactly (path, flags).  Any call with a third
+ * argument (e.g., open(path, O_CREAT|O_WRONLY, mode)) will fail at compile
+ * time with "too many arguments to macro", which is the intended behaviour —
+ * the previous variadic form silently dropped the mode, producing undefined
+ * file permissions.  All open() calls in the crypto2dev port use
+ * O_RDWR|O_CLOEXEC with no mode argument — this is the only safe pattern
+ * under this header.
+ *
+ * Do not include this header from any file that uses open() for purposes
+ * other than opening crypto2dev fds.
  */
 int     crypto2dev_sim_open (const char* path, int flags);
 int     crypto2dev_sim_close(int fd);
@@ -44,7 +56,19 @@ ssize_t crypto2dev_sim_write(int fd, const void* buf, size_t count);
 ssize_t crypto2dev_sim_read (int fd, void* buf, size_t count);
 int     crypto2dev_sim_ioctl(int fd, unsigned long request, void* arg);
 
-#define open(path, flags, ...)  crypto2dev_sim_open((path), (flags))
+/* Fault injection for testing error paths.
+ *
+ * crypto2dev_sim_set_ioctl_fail(n): the next n calls to crypto2dev_sim_ioctl
+ * will return -1 with errno=ENODEV instead of executing.  Call with 0 to
+ * cancel any pending injection.  Single-threaded test use only.
+ *
+ * Typical use:
+ *   crypto2dev_sim_set_ioctl_fail(1);   // next ioctl will fail
+ *   ret = wc_HmacFinal(&hmac, mac);     // INIT ioctl fails → WC_HW_E
+ *   crypto2dev_sim_set_ioctl_fail(0);   // reset (in case Final returned early) */
+void crypto2dev_sim_set_ioctl_fail(int count);
+
+#define open(path, flags)       crypto2dev_sim_open((path), (flags))
 #define close(fd)               crypto2dev_sim_close(fd)
 #define write(fd, buf, n)       crypto2dev_sim_write((fd), (buf), (size_t)(n))
 #define read(fd, buf, n)        crypto2dev_sim_read((fd), (buf), (size_t)(n))

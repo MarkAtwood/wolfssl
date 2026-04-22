@@ -44,6 +44,7 @@
     defined(WOLFSSL_CRYPTO2DEV_TEST)
 
 #include <wolfssl/wolfcrypt/port/crypto2dev/crypto2dev_port.h>
+#include <wolfssl/wolfcrypt/port/crypto2dev/crypto2dev_wire.h>
 #include <wolfssl/wolfcrypt/cryptocb.h>
 #include <wolfssl/wolfcrypt/error-crypt.h>
 #include <wolfssl/wolfcrypt/types.h>
@@ -55,6 +56,11 @@
 #include <wolfssl/wolfcrypt/random.h>
 #include <wolfssl/wolfcrypt/wc_port.h>
 #include <wolfssl/ssl.h>
+
+#ifdef WOLFSSL_CRYPTO2DEV_SIM
+/* Forward declaration — implementation in crypto2dev_sim.c */
+extern void crypto2dev_sim_set_ioctl_fail(int count);
+#endif
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                              */
@@ -166,6 +172,85 @@ static int test_aes_cbc_128(void)
     WOLFSSL_MSG("crypto2dev_test: AES-CBC-128 KAT passed");
     return 0;
 }
+
+/* ------------------------------------------------------------------ */
+/* Test 2b: AES-CTR-128 multi-call counter tracking                   */
+/*                                                                     */
+/* Source: NIST SP 800-38A, Appendix F.5.1 (CTR-AES128.Encrypt)      */
+/*   Key = 2b7e151628aed2a6abf7158809cf4f3c                            */
+/*   IV  = f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff                            */
+/*   PT  = 4 blocks (64 bytes)                                         */
+/*   CT  = 874d6191b620e3261bef6864990db6ce (blocks 1-2)               */
+/*         9806f66b7970fdff8617187bb9fffdff                            */
+/*         5ae4df3edbd5d35e5b4f09020db03eab (blocks 3-4)               */
+/*         1e031dda2fbe03d179217 0a0f3009cee                            */
+/*                                                                     */
+/* The test encrypts the 4-block plaintext in two separate             */
+/* wc_AesCtrEncrypt calls (2 blocks each).  The port must advance      */
+/* aes->reg correctly after the first call so the second call uses the */
+/* counter values f0f1...02 and f0f1...03, not f0f1...00 again.        */
+/*                                                                     */
+/* This verifies that the big-endian counter increment in the port     */
+/* matches wolfSSL's own IncrementAesCounter() convention.             */
+/* ------------------------------------------------------------------ */
+#ifdef WOLFSSL_AES_COUNTER
+static int test_aes_ctr_multicall(void)
+{
+    Aes aes;
+    byte key[16], iv[16];
+    static const byte pt[64] = {
+        0x6b,0xc1,0xbe,0xe2,0x2e,0x40,0x9f,0x96,
+        0xe9,0x3d,0x7e,0x11,0x73,0x93,0x17,0x2a,
+        0xae,0x2d,0x8a,0x57,0x1e,0x03,0xac,0x9c,
+        0x9e,0xb7,0x6f,0xac,0x45,0xaf,0x8e,0x51,
+        0x30,0xc8,0x1c,0x46,0xa3,0x5c,0xe4,0x11,
+        0xe5,0xfb,0xc1,0x19,0x1a,0x0a,0x52,0xef,
+        0xf6,0x9f,0x24,0x45,0xdf,0x4f,0x9b,0x17,
+        0xad,0x2b,0x41,0x7b,0xe6,0x6c,0x37,0x10
+    };
+    /* Expected: NIST SP 800-38A F.5.1, all 4 blocks */
+    static const byte expected_ct[64] = {
+        0x87,0x4d,0x61,0x91,0xb6,0x20,0xe3,0x26,
+        0x1b,0xef,0x68,0x64,0x99,0x0d,0xb6,0xce,
+        0x98,0x06,0xf6,0x6b,0x79,0x70,0xfd,0xff,
+        0x86,0x17,0x18,0x7b,0xb9,0xff,0xfd,0xff,
+        0x5a,0xe4,0xdf,0x3e,0xdb,0xd5,0xd3,0x5e,
+        0x5b,0x4f,0x09,0x02,0x0d,0xb0,0x3e,0xab,
+        0x1e,0x03,0x1d,0xda,0x2f,0xbe,0x03,0xd1,
+        0x79,0x21,0x70,0xa0,0xf3,0x00,0x9c,0xee
+    };
+    byte ct[64];
+    int ret;
+
+    ret  = hex_decode("2b7e151628aed2a6abf7158809cf4f3c", key, sizeof(key));
+    ret += hex_decode("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff", iv,  sizeof(iv));
+    if (ret != 2 * 16)
+        return -1;
+
+    ret = wc_AesInit(&aes, NULL, WOLF_CRYPTO2DEV_DEVID);
+    if (ret != 0) return ret;
+
+    ret = wc_AesSetKey(&aes, key, (word32)sizeof(key), iv, AES_ENCRYPTION);
+    if (ret != 0) {
+        wc_AesFree(&aes);
+        return ret;
+    }
+
+    /* First call: encrypt blocks 1-2 (32 bytes) */
+    ret = wc_AesCtrEncrypt(&aes, ct,      pt,      32);
+    /* Second call: encrypt blocks 3-4 (32 bytes), using the updated counter */
+    if (ret == 0)
+        ret = wc_AesCtrEncrypt(&aes, ct + 32, pt + 32, 32);
+    wc_AesFree(&aes);
+    if (ret != 0) return ret;
+
+    if (XMEMCMP(ct, expected_ct, sizeof(expected_ct)) != 0)
+        return -1;
+
+    WOLFSSL_MSG("crypto2dev_test: AES-CTR-128 multi-call KAT passed");
+    return 0;
+}
+#endif /* WOLFSSL_AES_COUNTER */
 
 /* ------------------------------------------------------------------ */
 /* Test 3: HMAC-SHA256                                                  */
@@ -323,7 +408,447 @@ static int test_aesgcm_empty(void)
     WOLFSSL_MSG("crypto2dev_test: AES-GCM empty-plaintext KAT passed");
     return 0;
 }
+
+/* ------------------------------------------------------------------ */
+/* Test 3d: AES-GCM oversized AAD must return BUFFER_E                 */
+/*                                                                     */
+/* CRYPTO2DEV_AAD_MAXLEN is 256 bytes.  Passing authInSz > 256 must   */
+/* return BUFFER_E rather than silently authenticating with empty AAD  */
+/* (which would be an authentication bypass).                          */
+/* ------------------------------------------------------------------ */
+static int test_aesgcm_oversized_aad(void)
+{
+    Aes aes;
+    byte key[16];
+    byte iv[12];
+    byte pt[16];
+    byte ct[16];
+    byte tag[16];
+    byte aad[CRYPTO2DEV_AAD_MAXLEN + 1]; /* 257 bytes — one over the limit */
+    int ret;
+
+    XMEMSET(key, 0, sizeof(key));
+    XMEMSET(iv,  0, sizeof(iv));
+    XMEMSET(pt,  0, sizeof(pt));
+    XMEMSET(aad, 0xAA, sizeof(aad));
+
+    ret = wc_AesInit(&aes, NULL, WOLF_CRYPTO2DEV_DEVID);
+    if (ret != 0) return ret;
+
+    ret = wc_AesSetKey(&aes, key, (word32)sizeof(key), NULL, AES_ENCRYPTION);
+    if (ret != 0) {
+        wc_AesFree(&aes);
+        return ret;
+    }
+
+    ret = wc_AesGcmEncrypt(&aes,
+                           ct, pt, (word32)sizeof(pt),
+                           iv, (word32)sizeof(iv),
+                           tag, (word32)sizeof(tag),
+                           aad, (word32)sizeof(aad));
+    wc_AesFree(&aes);
+
+    /* Must fail: oversized AAD cannot be passed to the device.
+     * Silently proceeding with empty AAD would be an auth bypass. */
+    if (ret != BUFFER_E) {
+        WOLFSSL_MSG("crypto2dev_test: oversized-AAD test expected BUFFER_E");
+        return -1;
+    }
+
+    WOLFSSL_MSG("crypto2dev_test: AES-GCM oversized-AAD rejection test passed");
+    return 0;
+}
+/* ------------------------------------------------------------------ */
+/* Test 3e: AES-GCM truncated tag (authTagSz=12)                       */
+/*                                                                     */
+/* NIST SP 800-38D Appendix B, Test Case 1 (empty PT and AAD):        */
+/*   K   = 00000000000000000000000000000000  (16 bytes)                */
+/*   IV  = 000000000000000000000000          (12 bytes)                */
+/*   P   = empty                                                        */
+/*   A   = empty                                                        */
+/*   T16 = 58e2fccefa7e3061367f1d57a4e7455a (full tag)                */
+/*   T12 = 58e2fccefa7e3061367f1d57          (12-byte truncated)       */
+/*                                                                     */
+/* Tests: encrypt produces correct 12-byte tag; decrypt succeeds with  */
+/* the correct tag; decrypt fails with AES_GCM_AUTH_E on a wrong tag. */
+/* ------------------------------------------------------------------ */
+static int test_aesgcm_truncated_tag(void)
+{
+    Aes  aes;
+    byte key[16];
+    byte iv[12];
+    byte tag[12];
+    byte expected_tag[12];
+    byte wrong_tag[12];
+    int  ret;
+
+    XMEMSET(key,      0,    sizeof(key));
+    XMEMSET(iv,       0,    sizeof(iv));
+    XMEMSET(tag,      0,    sizeof(tag));
+    XMEMSET(wrong_tag, 0xFF, sizeof(wrong_tag));
+
+    ret = hex_decode("58e2fccefa7e3061367f1d57",
+                     expected_tag, sizeof(expected_tag));
+    if (ret != (int)sizeof(expected_tag))
+        return -1;
+
+    /* Encrypt: empty PT, empty AAD, 12-byte tag */
+    ret = wc_AesInit(&aes, NULL, WOLF_CRYPTO2DEV_DEVID);
+    if (ret != 0) return ret;
+
+    ret = wc_AesSetKey(&aes, key, (word32)sizeof(key), NULL, AES_ENCRYPTION);
+    if (ret != 0) {
+        wc_AesFree(&aes);
+        return ret;
+    }
+
+    ret = wc_AesGcmEncrypt(&aes,
+                           NULL, NULL, 0,
+                           iv, (word32)sizeof(iv),
+                           tag, (word32)sizeof(tag),
+                           NULL, 0);
+    wc_AesFree(&aes);
+    if (ret != 0) {
+        WOLFSSL_MSG("crypto2dev_test: GCM truncated-tag encrypt failed");
+        return ret;
+    }
+
+    if (XMEMCMP(tag, expected_tag, sizeof(expected_tag)) != 0) {
+        WOLFSSL_MSG("crypto2dev_test: GCM truncated-tag KAT mismatch");
+        return -1;
+    }
+
+    /* Decrypt: correct 12-byte tag must succeed */
+    ret = wc_AesInit(&aes, NULL, WOLF_CRYPTO2DEV_DEVID);
+    if (ret != 0) return ret;
+
+    ret = wc_AesSetKey(&aes, key, (word32)sizeof(key), NULL, AES_ENCRYPTION);
+    if (ret != 0) {
+        wc_AesFree(&aes);
+        return ret;
+    }
+
+    ret = wc_AesGcmDecrypt(&aes,
+                           NULL, NULL, 0,
+                           iv, (word32)sizeof(iv),
+                           expected_tag, (word32)sizeof(expected_tag),
+                           NULL, 0);
+    wc_AesFree(&aes);
+    if (ret != 0) {
+        WOLFSSL_MSG("crypto2dev_test: GCM truncated-tag decrypt (correct tag) failed");
+        return ret;
+    }
+
+    /* Decrypt: wrong 12-byte tag must fail with AES_GCM_AUTH_E */
+    ret = wc_AesInit(&aes, NULL, WOLF_CRYPTO2DEV_DEVID);
+    if (ret != 0) return ret;
+
+    ret = wc_AesSetKey(&aes, key, (word32)sizeof(key), NULL, AES_ENCRYPTION);
+    if (ret != 0) {
+        wc_AesFree(&aes);
+        return ret;
+    }
+
+    ret = wc_AesGcmDecrypt(&aes,
+                           NULL, NULL, 0,
+                           iv, (word32)sizeof(iv),
+                           wrong_tag, (word32)sizeof(wrong_tag),
+                           NULL, 0);
+    wc_AesFree(&aes);
+    if (ret != AES_GCM_AUTH_E) {
+        WOLFSSL_MSG("crypto2dev_test: GCM truncated-tag wrong-tag expected AES_GCM_AUTH_E");
+        return -1;
+    }
+
+    WOLFSSL_MSG("crypto2dev_test: AES-GCM truncated-tag KAT passed");
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Test 3f: AES-GCM sub-minimum tag must not bypass authentication     */
+/*          (wolfssl-yjw.1)                                            */
+/*                                                                     */
+/* With the fix, the port returns CRYPTOCB_UNAVAILABLE for authTagSz   */
+/* 1-11 on both encrypt and decrypt paths, and wolfSSL falls through   */
+/* to software which enforces its own tag check.                       */
+/*                                                                     */
+/* Source: NIST SP 800-38D Appendix B Test Case 2                     */
+/*   K  = 00000000000000000000000000000000  (16 bytes)                */
+/*   IV = 000000000000000000000000          (12 bytes)                */
+/*   P  = 00000000000000000000000000000000  (16 bytes)                */
+/*   T  = ab6e47d42cec13bdf53a67b21257bddf  (16-byte tag)             */
+/*                                                                     */
+/* Oracle: decrypt with a wrong 4-byte or 8-byte tag must not return  */
+/* 0 (authentication must not be bypassed regardless of tag length).  */
+/* ------------------------------------------------------------------ */
+static int test_aesgcm_sub_min_tag(void)
+{
+    Aes  aes;
+    byte key[16]       = { 0 };
+    byte iv[12]        = { 0 };
+    byte pt[16]        = { 0 };
+    byte ct[16];
+    byte out[16];
+    byte tag16[16];
+    static const byte wrong_tag4[4] = { 0xFF, 0xFF, 0xFF, 0xFF };
+    static const byte wrong_tag8[8] = {
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
+    };
+    int ret;
+
+    /* Encrypt to obtain valid ciphertext and full 16-byte auth tag. */
+    ret = wc_AesInit(&aes, NULL, WOLF_CRYPTO2DEV_DEVID);
+    if (ret != 0) return ret;
+    ret = wc_AesSetKey(&aes, key, (word32)sizeof(key), NULL, AES_ENCRYPTION);
+    if (ret == 0)
+        ret = wc_AesGcmEncrypt(&aes,
+                               ct, pt, (word32)sizeof(pt),
+                               iv, (word32)sizeof(iv),
+                               tag16, (word32)sizeof(tag16),
+                               NULL, 0);
+    wc_AesFree(&aes);
+    if (ret != 0) return ret;
+
+    /* Decrypt with authTagSz=4 using a wrong tag.
+     * The port returns CRYPTOCB_UNAVAILABLE; wolfSSL software must
+     * detect the wrong tag and return a non-zero error. */
+    ret = wc_AesInit(&aes, NULL, WOLF_CRYPTO2DEV_DEVID);
+    if (ret != 0) return ret;
+    ret = wc_AesSetKey(&aes, key, (word32)sizeof(key), NULL, AES_ENCRYPTION);
+    if (ret == 0)
+        ret = wc_AesGcmDecrypt(&aes,
+                               out, ct, (word32)sizeof(ct),
+                               iv, (word32)sizeof(iv),
+                               wrong_tag4, (word32)sizeof(wrong_tag4),
+                               NULL, 0);
+    wc_AesFree(&aes);
+    if (ret == 0) {
+        WOLFSSL_MSG("crypto2dev_test: GCM 4-byte wrong tag accepted "
+                    "— authentication bypass");
+        return -1;
+    }
+
+    /* Decrypt with authTagSz=8 using a wrong tag. */
+    ret = wc_AesInit(&aes, NULL, WOLF_CRYPTO2DEV_DEVID);
+    if (ret != 0) return ret;
+    ret = wc_AesSetKey(&aes, key, (word32)sizeof(key), NULL, AES_ENCRYPTION);
+    if (ret == 0)
+        ret = wc_AesGcmDecrypt(&aes,
+                               out, ct, (word32)sizeof(ct),
+                               iv, (word32)sizeof(iv),
+                               wrong_tag8, (word32)sizeof(wrong_tag8),
+                               NULL, 0);
+    wc_AesFree(&aes);
+    if (ret == 0) {
+        WOLFSSL_MSG("crypto2dev_test: GCM 8-byte wrong tag accepted "
+                    "— authentication bypass");
+        return -1;
+    }
+
+    WOLFSSL_MSG("crypto2dev_test: AES-GCM sub-minimum tag rejection test passed");
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Test 3g: GCM encrypt with authTagSz > TAG_MAXLEN returns BUFFER_E  */
+/*          (wolfssl-yjw.3)                                            */
+/*                                                                     */
+/* Without the fix, authTagSz > 16 silently skips GET_TAG and returns */
+/* 0 — the caller's authTag buffer holds stale data.  With the fix,   */
+/* the encrypt call must return BUFFER_E.                              */
+/* ------------------------------------------------------------------ */
+static int test_aesgcm_oversized_tag(void)
+{
+    Aes  aes;
+    byte key[16]                       = { 0 };
+    byte iv[12]                        = { 0 };
+    byte pt[16]                        = { 0 };
+    byte ct[16];
+    byte tag[CRYPTO2DEV_TAG_MAXLEN + 1]; /* 17 bytes — one over limit */
+    int  ret;
+
+    ret = wc_AesInit(&aes, NULL, WOLF_CRYPTO2DEV_DEVID);
+    if (ret != 0) return ret;
+    ret = wc_AesSetKey(&aes, key, (word32)sizeof(key), NULL, AES_ENCRYPTION);
+    if (ret == 0)
+        ret = wc_AesGcmEncrypt(&aes,
+                               ct, pt, (word32)sizeof(pt),
+                               iv, (word32)sizeof(iv),
+                               tag, (word32)sizeof(tag),
+                               NULL, 0);
+    wc_AesFree(&aes);
+
+    /* wolfSSL validates authTagSz > WC_AES_BLOCK_SIZE before dispatching to the
+     * CryptoCb callback, so the port's BUFFER_E check is defense-in-depth and
+     * cannot be observed via wc_AesGcmEncrypt (wolfSSL returns BAD_FUNC_ARG
+     * first).  Accept any non-zero error: the invariant is that oversized tags
+     * must never silently return 0. */
+    if (ret == 0) {
+        WOLFSSL_MSG("crypto2dev_test: GCM oversized tag was not rejected");
+        return -1;
+    }
+
+    WOLFSSL_MSG("crypto2dev_test: AES-GCM oversized-tag rejection test passed");
+    return 0;
+}
+
 #endif /* HAVE_AESGCM */
+
+/* ------------------------------------------------------------------ */
+/* Test 3c2: HMAC short key (< 14 bytes) falls back to software        */
+/*           (wolfssl-qsi.4)                                           */
+/*                                                                     */
+/* FIPS SP 800-107 §5.3: HMAC key must be >= 14 bytes.  The port      */
+/* must return CRYPTOCB_UNAVAILABLE for sub-minimum keys so that       */
+/* wolfSSL's own FIPS check applies.  The critical test: after         */
+/* wc_HmacSetKey with a 13-byte key, hmac.devCtx must be NULL —       */
+/* hardware never claimed the key.  If devCtx is non-NULL the port     */
+/* returned 0 (success), bypassing wolfSSL software validation.        */
+/*                                                                     */
+/* Oracle: devCtx == NULL proves the port fell back to software.       */
+/* ------------------------------------------------------------------ */
+static int test_hmac_short_key_fallback(void)
+{
+    Hmac hmac;
+    byte key[13]; /* 13 bytes — one under the 14-byte FIPS minimum */
+    int ret;
+
+    XMEMSET(key, 0x0b, sizeof(key));
+
+    ret = wc_HmacInit(&hmac, NULL, WOLF_CRYPTO2DEV_DEVID);
+    if (ret != 0) return ret;
+
+    ret = wc_HmacSetKey(&hmac, WC_SHA256, key, (word32)sizeof(key));
+    /* In FIPS mode wolfSSL software path also rejects short keys (non-zero).
+     * In non-FIPS mode wolfSSL accepts the key in software (ret == 0).
+     * Either way, the hardware must not have claimed it: devCtx must be NULL. */
+    if (hmac.devCtx != NULL) {
+        WOLFSSL_MSG("crypto2dev_test: short HMAC key was accepted by hardware "
+                    "— FIPS minimum bypass (wolfssl-qsi.4)");
+        wc_HmacFree(&hmac);
+        return -1;
+    }
+
+    wc_HmacFree(&hmac);
+    WOLFSSL_MSG("crypto2dev_test: HMAC short-key hardware fallback test passed");
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Test 3f: HMAC oversized input returns WC_HW_E                       */
+/*                                                                     */
+/* The port buffers the entire HMAC input before sending to hardware.  */
+/* Any wc_HmacUpdate call whose running total would exceed             */
+/* WOLFSSL_CRYPTO2DEV_HMAC_MAX_BUF (default 64 KB) must return         */
+/* WC_HW_E.  CRYPTOCB_UNAVAILABLE is NOT safe: the port's HMAC SETKEY  */
+/* returns 0 (claiming the key), so wolfSSL never runs its own ipad/   */
+/* opad schedule; a software fallback would compute HMAC with an       */
+/* all-zeros key and return it as success.                              */
+/* ------------------------------------------------------------------ */
+static int test_hmac_oversized(void)
+{
+    Hmac   hmac;
+    byte   key[20];
+    byte  *big_data = NULL;
+    word32 big_sz   = WOLFSSL_CRYPTO2DEV_HMAC_MAX_BUF + 1u;
+    byte   mac[WC_SHA256_DIGEST_SIZE];
+    int    ret;
+
+    XMEMSET(key, 0x0b, sizeof(key));
+
+    /* Use XMALLOC to avoid a large stack allocation. */
+    big_data = (byte*)XMALLOC(big_sz, NULL, DYNAMIC_TYPE_TMP_BUFFER);
+    if (big_data == NULL)
+        return MEMORY_E;
+    XMEMSET(big_data, 0xAA, big_sz);
+
+    ret = wc_HmacInit(&hmac, NULL, WOLF_CRYPTO2DEV_DEVID);
+    if (ret != 0)
+        goto done;
+
+    ret = wc_HmacSetKey(&hmac, WC_SHA256, key, (word32)sizeof(key));
+    if (ret != 0)
+        goto free_hmac;
+
+    /* Single Update larger than the cap — must return WC_HW_E. */
+    ret = wc_HmacUpdate(&hmac, big_data, big_sz);
+    if (ret != WC_HW_E) {
+        WOLFSSL_MSG("crypto2dev_test: oversized HMAC expected WC_HW_E");
+        if (ret == 0) {
+            /* Clean up if Update incorrectly succeeded. */
+            (void)wc_HmacFinal(&hmac, mac);
+        }
+        ret = -1;
+        goto free_hmac;
+    }
+    WOLFSSL_MSG("crypto2dev_test: HMAC oversized-input rejection test passed");
+    ret = 0;
+
+free_hmac:
+    wc_HmacFree(&hmac);
+done:
+    XFREE(big_data, NULL, DYNAMIC_TYPE_TMP_BUFFER);
+    return ret;
+}
+
+/* ------------------------------------------------------------------ */
+/* Test 3g: HMAC Final + Free lifecycle — no leak or double-free       */
+/*                                                                     */
+/* After wc_HmacFinal(), the port must free the HmacCtx struct and    */
+/* NULL devCtx so that wc_HmacFree() does not issue a spurious second  */
+/* hardware HMAC call on the now-dead context.  This test runs two     */
+/* back-to-back HMAC operations on the same struct to verify that the  */
+/* device state is clean after the first Final + Free cycle.          */
+/*                                                                     */
+/* Both operations use RFC 4231 TC1 to verify correct results.         */
+/* ------------------------------------------------------------------ */
+static int test_hmac_lifecycle(void)
+{
+    Hmac hmac;
+    byte key[20];
+    const byte data[] = { 'H', 'i', ' ', 'T', 'h', 'e', 'r', 'e' };
+    byte mac[WC_SHA256_DIGEST_SIZE];
+    byte expected[WC_SHA256_DIGEST_SIZE];
+    int ret;
+    int round;
+
+    ret = hex_decode(
+        "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"
+        "0b0b0b0b",
+        key, sizeof(key));
+    if (ret != (int)sizeof(key))
+        return -1;
+
+    ret = hex_decode(
+        "b0344c61d8db38535ca8afceaf0bf12b"
+        "881dc200c9833da726e9376c2e32cff7",
+        expected, sizeof(expected));
+    if (ret != WC_SHA256_DIGEST_SIZE)
+        return -1;
+
+    /* Run the same HMAC twice using Init/SetKey/Update/Final/Free each time.
+     * A leak or use-after-free in the first cycle would corrupt the second. */
+    for (round = 0; round < 2; round++) {
+        ret = wc_HmacInit(&hmac, NULL, WOLF_CRYPTO2DEV_DEVID);
+        if (ret != 0) return ret;
+
+        ret = wc_HmacSetKey(&hmac, WC_SHA256, key, (word32)sizeof(key));
+        if (ret == 0)
+            ret = wc_HmacUpdate(&hmac, data, (word32)sizeof(data));
+        if (ret == 0)
+            ret = wc_HmacFinal(&hmac, mac);
+        wc_HmacFree(&hmac);
+        if (ret != 0) return ret;
+
+        if (XMEMCMP(mac, expected, WC_SHA256_DIGEST_SIZE) != 0) {
+            WOLFSSL_MSG("crypto2dev_test: HMAC lifecycle KAT mismatch");
+            return -1;
+        }
+    }
+
+    WOLFSSL_MSG("crypto2dev_test: HMAC lifecycle test passed");
+    return 0;
+}
 
 /* ------------------------------------------------------------------ */
 /* Test 4: ECDSA P-256 sign + verify round-trip                        */
@@ -364,28 +889,25 @@ static int test_ecdsa_roundtrip(void)
     ret = wc_ecc_make_key_ex(&rng, 32, &priv_key, ECC_SECP256R1);
     if (ret != 0) { wc_ecc_free(&priv_key); wc_FreeRng(&rng); return ret; }
 
-    /* Copy private key to a new object with WOLF_CRYPTO2DEV_DEVID so
-     * that the SETKEY callback fires and imports it into the port.    */
+    /* Import private key into a device-bound object via the public wolfSSL API.
+     * wc_ecc_import_private_key_ex fires the SETKEY callback when sign_key
+     * has a devId, so this exercises the full wolfSSL → CryptoCb → port path. */
     {
-        ecc_key sign_key;
-        ret = wc_ecc_init_ex(&sign_key, NULL, WOLF_CRYPTO2DEV_DEVID);
+        ecc_key  sign_key;
+        byte     priv_raw[ECC_MAXSIZE];
+        word32   priv_raw_len = (word32)sizeof(priv_raw);
+        byte     pub_x963[1 + 2 * ECC_MAXSIZE];
+        word32   pub_x963_len = (word32)sizeof(pub_x963);
+
+        ret = wc_ecc_export_private_only(&priv_key, priv_raw, &priv_raw_len);
+        if (ret == 0)
+            ret = wc_ecc_export_x963(&priv_key, pub_x963, &pub_x963_len);
+        if (ret == 0)
+            ret = wc_ecc_init_ex(&sign_key, NULL, WOLF_CRYPTO2DEV_DEVID);
         if (ret == 0) {
-            /* Force the SETKEY callback by calling SetKey on the
-             * hardware-bound object.  We use the direct CryptoCb
-             * helper.  Since the port file is the same TU as this
-             * test (via the build system), we can call the public
-             * wc_CryptoCb API.  The wc_ecc_sign_hash call below
-             * triggers WC_ALGO_TYPE_PK which uses devCtx. */
-            {
-                wc_CryptoInfo ki;
-                XMEMSET(&ki, 0, sizeof(ki));
-                ki.algo_type    = WC_ALGO_TYPE_SETKEY;
-                ki.setkey.type  = WC_SETKEY_ECC_PRIV;
-                ki.setkey.obj   = &sign_key;
-                ki.setkey.key   = &priv_key;
-                ki.setkey.keySz = (word32)wc_ecc_size(&priv_key);
-                ret = wc_crypto2dev_cb(WOLF_CRYPTO2DEV_DEVID, &ki, NULL);
-            }
+            ret = wc_ecc_import_private_key_ex(priv_raw, priv_raw_len,
+                                               pub_x963, pub_x963_len,
+                                               &sign_key, ECC_SECP256R1);
             if (ret == 0) {
                 ret = wc_ecc_sign_hash(digest, sizeof(digest),
                                        sig, &sig_len,
@@ -393,6 +915,7 @@ static int test_ecdsa_roundtrip(void)
             }
             wc_ecc_free(&sign_key);
         }
+        XMEMSET(priv_raw, 0, sizeof(priv_raw));
     }
 
     if (ret != 0) {
@@ -401,7 +924,9 @@ static int test_ecdsa_roundtrip(void)
         return ret;
     }
 
-    /* Verify: import public key into a port-bound object */
+    /* Verify: import public key into a port-bound object via public API.
+     * wc_ecc_import_x963_ex2 fires the SETKEY callback when verify_key
+     * has a devId. */
     {
         ecc_key verify_key;
         byte    x963[1 + 2 * ECC_MAXSIZE];
@@ -411,14 +936,8 @@ static int test_ecdsa_roundtrip(void)
         if (ret == 0)
             ret = wc_ecc_init_ex(&verify_key, NULL, WOLF_CRYPTO2DEV_DEVID);
         if (ret == 0) {
-            wc_CryptoInfo ki;
-            XMEMSET(&ki, 0, sizeof(ki));
-            ki.algo_type   = WC_ALGO_TYPE_SETKEY;
-            ki.setkey.type = WC_SETKEY_ECC_PUB;
-            ki.setkey.obj  = &verify_key;
-            ki.setkey.key  = &priv_key;
-            ki.setkey.keySz = x963_len;
-            ret = wc_crypto2dev_cb(WOLF_CRYPTO2DEV_DEVID, &ki, NULL);
+            ret = wc_ecc_import_x963_ex2(x963, x963_len,
+                                         &verify_key, ECC_SECP256R1, 0);
         }
         if (ret == 0) {
             ret = wc_ecc_verify_hash(sig, sig_len,
@@ -437,11 +956,240 @@ static int test_ecdsa_roundtrip(void)
     WOLFSSL_MSG("crypto2dev_test: ECDSA P-256 round-trip passed");
     return 0;
 }
+
+/* ------------------------------------------------------------------ */
+/* Test 4b: P-192 key rejected by hardware, falls back to software     */
+/*          (wolfssl-yjw.2)                                            */
+/*                                                                     */
+/* The port returns CRYPTOCB_UNAVAILABLE for ECC keys with field_sz   */
+/* < 32 (FIPS 140-3 IG D.1: P-256 minimum). P-192 (field_sz=24) must  */
+/* never reach the hardware; wolfSSL falls back to software sign/verify */
+/* which must produce a correct result.                                 */
+/* ------------------------------------------------------------------ */
+static int test_ecc_setkey_rejects_p192(void)
+{
+    ecc_key priv_key;
+    WC_RNG  rng;
+    byte    digest[WC_SHA256_DIGEST_SIZE];
+    byte    sig[ECC_MAX_SIG_SIZE];
+    word32  sig_len = (word32)sizeof(sig);
+    int     verify_res = 0;
+    int     ret;
+    int     i;
+
+    for (i = 0; i < WC_SHA256_DIGEST_SIZE; i++)
+        digest[i] = 0xCD;
+
+    ret = wc_InitRng(&rng);
+    if (ret != 0) return ret;
+
+    ret = wc_ecc_init_ex(&priv_key, NULL, INVALID_DEVID);
+    if (ret != 0) { wc_FreeRng(&rng); return ret; }
+
+    /* Generate P-192 key with software. If P-192 is not compiled in, skip. */
+    ret = wc_ecc_make_key_ex(&rng, 24, &priv_key, ECC_SECP192R1);
+    if (ret != 0) {
+        WOLFSSL_MSG("crypto2dev_test: P-192 not available, skipping");
+        wc_ecc_free(&priv_key);
+        wc_FreeRng(&rng);
+        return 0;
+    }
+
+    /* Import private key into a device-bound object.
+     * SETKEY callback sees field_sz=24 < 32 → CRYPTOCB_UNAVAILABLE.
+     * wolfSSL falls through to software setkey; devCtx remains NULL.
+     * Subsequent sign is also CRYPTOCB_UNAVAILABLE → software sign. */
+    {
+        ecc_key  sign_key;
+        byte     priv_raw[ECC_MAXSIZE];
+        word32   priv_raw_len = (word32)sizeof(priv_raw);
+        byte     pub_x963[1 + 2 * ECC_MAXSIZE];
+        word32   pub_x963_len = (word32)sizeof(pub_x963);
+
+        ret = wc_ecc_export_private_only(&priv_key, priv_raw, &priv_raw_len);
+        if (ret == 0)
+            ret = wc_ecc_export_x963(&priv_key, pub_x963, &pub_x963_len);
+        if (ret == 0)
+            ret = wc_ecc_init_ex(&sign_key, NULL, WOLF_CRYPTO2DEV_DEVID);
+        if (ret == 0) {
+            ret = wc_ecc_import_private_key_ex(priv_raw, priv_raw_len,
+                                               pub_x963, pub_x963_len,
+                                               &sign_key, ECC_SECP192R1);
+            if (ret == 0) {
+                ret = wc_ecc_sign_hash(digest, sizeof(digest),
+                                       sig, &sig_len,
+                                       &rng, &sign_key);
+            }
+            wc_ecc_free(&sign_key);
+        }
+        XMEMSET(priv_raw, 0, sizeof(priv_raw));
+    }
+
+    if (ret != 0) {
+        wc_ecc_free(&priv_key);
+        wc_FreeRng(&rng);
+        return ret;
+    }
+
+    /* Verify: public key import fires SETKEY → CRYPTOCB_UNAVAILABLE → software.
+     * Verify must succeed and return verify_res=1. */
+    {
+        ecc_key verify_key;
+        byte    x963[1 + 2 * ECC_MAXSIZE];
+        word32  x963_len = (word32)sizeof(x963);
+
+        ret = wc_ecc_export_x963(&priv_key, x963, &x963_len);
+        if (ret == 0)
+            ret = wc_ecc_init_ex(&verify_key, NULL, WOLF_CRYPTO2DEV_DEVID);
+        if (ret == 0) {
+            ret = wc_ecc_import_x963_ex2(x963, x963_len,
+                                         &verify_key, ECC_SECP192R1, 0);
+        }
+        if (ret == 0) {
+            ret = wc_ecc_verify_hash(sig, sig_len,
+                                     digest, sizeof(digest),
+                                     &verify_res, &verify_key);
+        }
+        wc_ecc_free(&verify_key);
+    }
+
+    wc_ecc_free(&priv_key);
+    wc_FreeRng(&rng);
+
+    if (ret != 0) return ret;
+    if (verify_res != 1) return -1;
+
+    WOLFSSL_MSG("crypto2dev_test: ECC P-192 hardware rejection / software fallback passed");
+    return 0;
+}
 #endif /* WOLF_CRYPTO_CB_SETKEY */
 #endif /* HAVE_ECC */
 
 /* ------------------------------------------------------------------ */
-/* Test 5: TLS 1.3 integration                                         */
+/* Test 4c: AES COPY with active devCtx returns WC_HW_E               */
+/*          (wolfssl-yjw.5)                                            */
+/*                                                                     */
+/* If src.devCtx != NULL and wolfSSL falls through to XMEMCPY, both   */
+/* src and dst alias the same heap block.  wc_AesFree on either one   */
+/* produces a double-free of the key-fd handle.  The fix: the COPY    */
+/* callback returns WC_HW_E when devCtx is non-NULL.                  */
+/*                                                                     */
+/* wc_AesCopy does not exist in the current wolfSSL API, so we test   */
+/* the callback directly via wc_crypto2dev_cb with a synthetic         */
+/* wc_CryptoInfo.  This is a white-box unit test of the callback guard. */
+/* ------------------------------------------------------------------ */
+#if defined(WOLF_CRYPTO_CB_COPY) && defined(WOLF_CRYPTO_CB_SETKEY)
+static int test_aes_copy_devctx_guard(void)
+{
+    Aes           src_aes;
+    Aes           dst_aes;
+    wc_CryptoInfo info;
+    byte          key[16] = { 0 };
+    int           ret;
+
+    ret = wc_AesInit(&src_aes, NULL, WOLF_CRYPTO2DEV_DEVID);
+    if (ret != 0) return ret;
+    ret = wc_AesSetKey(&src_aes, key, (word32)sizeof(key), NULL, AES_ENCRYPTION);
+    if (ret != 0) {
+        wc_AesFree(&src_aes);
+        return ret;
+    }
+
+    if (src_aes.devCtx == NULL) {
+        /* SETKEY did not set devCtx — hardware unavailable or key unsupported.
+         * Nothing to guard; skip. */
+        WOLFSSL_MSG("crypto2dev_test: AES SETKEY devCtx NULL, skipping COPY guard");
+        wc_AesFree(&src_aes);
+        return 0;
+    }
+
+    XMEMSET(&info,    0, sizeof(info));
+    XMEMSET(&dst_aes, 0, sizeof(dst_aes));
+    info.algo_type = WC_ALGO_TYPE_COPY;
+    info.copy.algo = WC_ALGO_TYPE_CIPHER;
+    info.copy.type = WC_CIPHER_AES;
+    info.copy.src  = &src_aes;
+    info.copy.dst  = &dst_aes;
+
+    ret = wc_crypto2dev_cb(WOLF_CRYPTO2DEV_DEVID, &info, NULL);
+    wc_AesFree(&src_aes);
+
+    if (ret != WC_HW_E) {
+        WOLFSSL_MSG("crypto2dev_test: AES COPY with active devCtx expected WC_HW_E");
+        return -1;
+    }
+
+    WOLFSSL_MSG("crypto2dev_test: AES COPY devCtx guard test passed");
+    return 0;
+}
+#endif /* WOLF_CRYPTO_CB_COPY && WOLF_CRYPTO_CB_SETKEY */
+
+/* ------------------------------------------------------------------ */
+/* Test 4b: HMAC COPY callback with active devCtx returns WC_HW_E     */
+/*          (wolfssl-qsi.2 / wolfssl-qsi.14)                           */
+/*                                                                     */
+/* wc_HmacCopy does not dispatch through CryptoCb COPY today, so this */
+/* test uses wc_crypto2dev_cb directly to exercise the guard added in  */
+/* wolfssl-qsi.2.  If upstream ever adds CryptoCb COPY dispatch for   */
+/* HMAC, this test will validate the guard via the normal API too.     */
+/* ------------------------------------------------------------------ */
+#if defined(WOLF_CRYPTO_CB_COPY) && defined(WOLF_CRYPTO_CB_SETKEY) && !defined(NO_HMAC)
+static int test_hmac_copy_devctx_guard(void)
+{
+    Hmac          src_hmac;
+    Hmac          dst_hmac;
+    wc_CryptoInfo info;
+    byte          key[20]; /* 20 bytes — above the 14-byte FIPS minimum */
+    byte          data[4]  = { 0x01, 0x02, 0x03, 0x04 };
+    int           ret;
+
+    XMEMSET(key, 0x0b, sizeof(key));
+
+    ret = wc_HmacInit(&src_hmac, NULL, WOLF_CRYPTO2DEV_DEVID);
+    if (ret != 0) return ret;
+    ret = wc_HmacSetKey(&src_hmac, WC_SHA256, key, (word32)sizeof(key));
+    if (ret != 0) {
+        wc_HmacFree(&src_hmac);
+        return ret;
+    }
+    /* Update so the streaming buffer (ctx->data) is allocated. */
+    ret = wc_HmacUpdate(&src_hmac, data, (word32)sizeof(data));
+    if (ret != 0) {
+        wc_HmacFree(&src_hmac);
+        return ret;
+    }
+
+    if (src_hmac.devCtx == NULL) {
+        /* SETKEY did not set devCtx — hardware unavailable or key unsupported.
+         * Nothing to guard; skip. */
+        WOLFSSL_MSG("crypto2dev_test: HMAC SETKEY devCtx NULL, skipping COPY guard");
+        wc_HmacFree(&src_hmac);
+        return 0;
+    }
+
+    XMEMSET(&info,     0, sizeof(info));
+    XMEMSET(&dst_hmac, 0, sizeof(dst_hmac));
+    info.algo_type  = WC_ALGO_TYPE_COPY;
+    info.copy.algo  = WC_ALGO_TYPE_HMAC;
+    info.copy.type  = WC_HASH_TYPE_SHA256;
+    info.copy.src   = &src_hmac;
+    info.copy.dst   = &dst_hmac;
+
+    ret = wc_crypto2dev_cb(WOLF_CRYPTO2DEV_DEVID, &info, NULL);
+    wc_HmacFree(&src_hmac);
+
+    if (ret != WC_HW_E) {
+        WOLFSSL_MSG("crypto2dev_test: HMAC COPY with active devCtx expected WC_HW_E");
+        return -1;
+    }
+
+    WOLFSSL_MSG("crypto2dev_test: HMAC COPY devCtx guard test passed");
+    return 0;
+}
+#endif /* WOLF_CRYPTO_CB_COPY && WOLF_CRYPTO_CB_SETKEY && !NO_HMAC */
+
+/* ------------------------------------------------------------------ */
+/* Test 5: TLS 1.3 devId assignment and per-primitive routing          */
 /*                                                                     */
 /* Validates the three behaviours that TLS 1.3 relies on:             */
 /*   a. wc_crypto2dev_assign_devid(ctx) sets WOLF_CRYPTO2DEV_DEVID    */
@@ -462,7 +1210,7 @@ static int test_ecdsa_roundtrip(void)
 /* ------------------------------------------------------------------ */
 #ifdef WOLFSSL_TLS13
 #ifndef NO_WOLFSSL_CLIENT
-static int test_tls13_integration(void)
+static int test_tls13_devid_and_primitive_routing(void)
 {
     WOLFSSL_CTX* ctx = NULL;
     wc_Sha256    sha;
@@ -490,18 +1238,18 @@ static int test_tls13_integration(void)
     /* Step a: create CTX and assign devId */
     ctx = wolfSSL_CTX_new(wolfTLSv1_3_client_method());
     if (ctx == NULL) {
-        WOLFSSL_MSG("crypto2dev_tls13_test: wolfSSL_CTX_new failed");
+        WOLFSSL_MSG("crypto2dev_test: tls13: wolfSSL_CTX_new failed");
         return -1;
     }
 
     ret = wc_crypto2dev_assign_devid(ctx);
     if (ret != 0) {
-        WOLFSSL_MSG("crypto2dev_tls13_test: assign_devid failed");
+        WOLFSSL_MSG("crypto2dev_test: tls13: assign_devid failed");
         goto done;
     }
 
     if (wolfSSL_CTX_GetDevId(ctx, NULL) != WOLF_CRYPTO2DEV_DEVID) {
-        WOLFSSL_MSG("crypto2dev_tls13_test: devId not set correctly");
+        WOLFSSL_MSG("crypto2dev_test: tls13: devId not set correctly");
         ret = -1;
         goto done;
     }
@@ -518,29 +1266,29 @@ static int test_tls13_integration(void)
 
     ret = wc_InitSha256_ex(&sha, NULL, WOLF_CRYPTO2DEV_DEVID);
     if (ret != 0) {
-        WOLFSSL_MSG("crypto2dev_tls13_test: SHA-256 init failed");
+        WOLFSSL_MSG("crypto2dev_test: tls13: SHA-256 init failed");
         goto done;
     }
     sha_inited = 1;
 
     ret = wc_Sha256Update(&sha, abc, (word32)sizeof(abc));
     if (ret != 0) {
-        WOLFSSL_MSG("crypto2dev_tls13_test: SHA-256 update failed");
+        WOLFSSL_MSG("crypto2dev_test: tls13: SHA-256 update failed");
         goto done;
     }
 
     ret = wc_Sha256Final(&sha, digest);
     if (ret != 0) {
-        WOLFSSL_MSG("crypto2dev_tls13_test: SHA-256 final failed");
+        WOLFSSL_MSG("crypto2dev_test: tls13: SHA-256 final failed");
         goto done;
     }
 
     if (XMEMCMP(digest, expected_sha, WC_SHA256_DIGEST_SIZE) != 0) {
-        WOLFSSL_MSG("crypto2dev_tls13_test: SHA-256 software fallback KAT FAILED");
+        WOLFSSL_MSG("crypto2dev_test: tls13: SHA-256 software fallback KAT FAILED");
         ret = -1;
         goto done;
     }
-    WOLFSSL_MSG("crypto2dev_tls13_test: SHA-256 software fallback KAT passed");
+    WOLFSSL_MSG("crypto2dev_test: tls13: SHA-256 software fallback KAT passed");
 
     /* Step c: HMAC-SHA256 RFC 4231 TC1 — must route to hardware */
     ret = hex_decode(
@@ -563,7 +1311,7 @@ static int test_tls13_integration(void)
 
     ret = wc_HmacInit(&hmac, NULL, WOLF_CRYPTO2DEV_DEVID);
     if (ret != 0) {
-        WOLFSSL_MSG("crypto2dev_tls13_test: HMAC init failed");
+        WOLFSSL_MSG("crypto2dev_test: tls13: HMAC init failed");
         goto done;
     }
     hmac_inited = 1;
@@ -574,16 +1322,16 @@ static int test_tls13_integration(void)
     if (ret == 0)
         ret = wc_HmacFinal(&hmac, mac);
     if (ret != 0) {
-        WOLFSSL_MSG("crypto2dev_tls13_test: HMAC operation failed");
+        WOLFSSL_MSG("crypto2dev_test: tls13: HMAC operation failed");
         goto done;
     }
 
     if (XMEMCMP(mac, expected_hmac, WC_SHA256_DIGEST_SIZE) != 0) {
-        WOLFSSL_MSG("crypto2dev_tls13_test: HMAC-SHA256 hardware KAT FAILED");
+        WOLFSSL_MSG("crypto2dev_test: tls13: HMAC-SHA256 hardware KAT FAILED");
         ret = -1;
         goto done;
     }
-    WOLFSSL_MSG("crypto2dev_tls13_test: HMAC-SHA256 hardware KAT passed");
+    WOLFSSL_MSG("crypto2dev_test: tls13: HMAC-SHA256 hardware KAT passed");
 
     /* Step d: AES-GCM KAT — NIST SP 800-38D Appendix B Test Case 2 */
     XMEMSET(ct,  0, sizeof(ct));
@@ -604,23 +1352,19 @@ static int test_tls13_integration(void)
 
     ret = wc_AesInit(&aes, NULL, WOLF_CRYPTO2DEV_DEVID);
     if (ret != 0) {
-        WOLFSSL_MSG("crypto2dev_tls13_test: AES init failed");
+        WOLFSSL_MSG("crypto2dev_test: tls13: AES init failed");
         goto done;
     }
     aes_inited = 1;
 
-    /* wc_AesGcmSetKey internally calls wc_AesEncrypt to pre-compute H,
-     * which requires aes->rounds to be set via software key expansion.
-     * When WOLF_CRYPTO_CB_SETKEY is active and the callback returns 0,
-     * the software key expansion is skipped and aes->rounds stays 0,
-     * causing wc_AesEncrypt to fail with KEYUSAGE_E.  Use wc_AesSetKey
-     * with a NULL IV instead — the same approach used in test_aesgcm_empty().
-     * This is sufficient: aes->devCtx is populated, and the actual GCM
-     * encryption/decryption is done entirely by the crypto2dev shim. */
+    /* wc_AesSetKey with a NULL IV populates aes->devCtx via the SETKEY
+     * callback and, because the callback returns CRYPTOCB_UNAVAILABLE,
+     * also runs the software key schedule (setting aes->rounds).  This
+     * is the same approach used in test_aesgcm_empty(). */
     ret = wc_AesSetKey(&aes, aes_key, (word32)sizeof(aes_key),
                        NULL, AES_ENCRYPTION);
     if (ret != 0) {
-        WOLFSSL_MSG("crypto2dev_tls13_test: AES-GCM SetKey failed");
+        WOLFSSL_MSG("crypto2dev_test: tls13: AES-GCM SetKey failed");
         goto done;
     }
 
@@ -630,23 +1374,23 @@ static int test_tls13_integration(void)
                            tag, (word32)sizeof(tag),
                            NULL, 0);
     if (ret != 0) {
-        WOLFSSL_MSG("crypto2dev_tls13_test: AES-GCM encrypt failed");
+        WOLFSSL_MSG("crypto2dev_test: tls13: AES-GCM encrypt failed");
         goto done;
     }
 
     if (XMEMCMP(ct, expected_ct, sizeof(expected_ct)) != 0) {
-        WOLFSSL_MSG("crypto2dev_tls13_test: AES-GCM KAT ciphertext mismatch");
+        WOLFSSL_MSG("crypto2dev_test: tls13: AES-GCM KAT ciphertext mismatch");
         ret = -1;
         goto done;
     }
     if (XMEMCMP(tag, expected_tag, sizeof(expected_tag)) != 0) {
-        WOLFSSL_MSG("crypto2dev_tls13_test: AES-GCM KAT tag mismatch");
+        WOLFSSL_MSG("crypto2dev_test: tls13: AES-GCM KAT tag mismatch");
         ret = -1;
         goto done;
     }
-    WOLFSSL_MSG("crypto2dev_tls13_test: AES-GCM KAT passed");
+    WOLFSSL_MSG("crypto2dev_test: tls13: AES-GCM KAT passed");
 
-    WOLFSSL_MSG("crypto2dev TLS13 test passed");
+    WOLFSSL_MSG("crypto2dev_test: TLS 1.3 devId and primitive routing passed");
 
 done:
     if (aes_inited)
@@ -815,6 +1559,259 @@ done:
 #endif /* NO_WOLFSSL_CLIENT */
 
 /* ------------------------------------------------------------------ */
+/* Error-path tests (self-contained init/cleanup cycles)               */
+/*                                                                     */
+/* Each test calls wc_crypto2dev_init() and wc_crypto2dev_cleanup()    */
+/* independently so pool-size and fault-injection state do not leak    */
+/* into the main test sequence above.                                  */
+/* ------------------------------------------------------------------ */
+
+/* Test E1: HMAC Final returns WC_HW_E and clears devCtx when the pool
+ * is exhausted by an in-progress SHA-256 hash holding the only slot.
+ *
+ * Pool is forced to 1.  A SHA-256 Update acquires the single op fd.
+ * The subsequent HMAC Final tries to acquire a slot → exhausted →
+ * WC_HW_E.  The port frees devCtx unconditionally on this path so
+ * wc_HmacFree cannot issue a spurious second Final callback.          */
+static int test_hmac_final_pool_exhaustion(void)
+{
+    wc_Sha256  sha;
+    Hmac       hmac;
+    byte       key[20];
+    const byte data[] = { 0x01, 0x02, 0x03, 0x04 };
+    byte       mac[WC_SHA256_DIGEST_SIZE];
+    int        ret;
+    int        sha_inited  = 0;
+    int        hmac_inited = 0;
+
+    ret = wc_crypto2dev_init(1);  /* pool_size=1: one slot total */
+    if (ret != 0) return ret;
+    ret = wc_crypto2dev_register();
+    if (ret != 0) { wc_crypto2dev_cleanup(); return ret; }
+
+    /* Acquire the only pool slot via a SHA-256 Init+Update.
+     * The port allocates op_fd into Crypto2DevHashCtx on the first
+     * Update when devCtx == NULL; the slot is held until Final/Free. */
+    ret = wc_InitSha256_ex(&sha, NULL, WOLF_CRYPTO2DEV_DEVID);
+    if (ret != 0) goto pool_done;
+    sha_inited = 1;
+    ret = wc_Sha256Update(&sha, data, (word32)sizeof(data));
+    if (ret != 0) goto pool_done;
+
+    if (sha.devCtx == NULL) {
+        /* Hardware path was not taken (device lacks SHA-256 or returned
+         * CRYPTOCB_UNAVAILABLE).  Pool slot not held; skip test. */
+        WOLFSSL_MSG("crypto2dev_test: SHA-256 devCtx NULL — skipping pool exhaustion");
+        ret = 0;
+        goto pool_done;
+    }
+
+    /* Set up HMAC: SetKey stores key in devCtx (no pool slot yet). */
+    XMEMSET(key, 0x0b, sizeof(key));
+    ret = wc_HmacInit(&hmac, NULL, WOLF_CRYPTO2DEV_DEVID);
+    if (ret != 0) goto pool_done;
+    hmac_inited = 1;
+    ret = wc_HmacSetKey(&hmac, WC_SHA256, key, (word32)sizeof(key));
+    if (ret != 0) goto pool_done;
+    ret = wc_HmacUpdate(&hmac, data, (word32)sizeof(data));
+    if (ret != 0) goto pool_done;
+
+    /* Final tries to acquire a pool slot — must fail (exhausted). */
+    ret = wc_HmacFinal(&hmac, mac);
+    if (ret != WC_HW_E) {
+        WOLFSSL_MSG("crypto2dev_test: HMAC Final pool exhaustion expected WC_HW_E");
+        ret = (ret == 0) ? -1 : ret;
+        goto pool_done;
+    }
+    ret = 0;
+
+    /* Port frees devCtx on WC_HW_E so wc_HmacFree cannot double-free. */
+    if (hmac.devCtx != NULL) {
+        WOLFSSL_MSG("crypto2dev_test: HMAC devCtx not freed after pool exhaustion");
+        ret = -1;
+        goto pool_done;
+    }
+
+    WOLFSSL_MSG("crypto2dev_test: HMAC Final pool exhaustion test passed");
+
+pool_done:
+    if (sha_inited)  wc_Sha256Free(&sha);
+    if (hmac_inited) wc_HmacFree(&hmac);
+    wc_crypto2dev_cleanup();
+    return ret;
+}
+
+/* Test E2: HMAC Final returns WC_HW_E and clears devCtx when
+ * CRYPTO2DEV_IOC_INIT fails mid-operation.
+ *
+ * Requires the software simulator for fault injection.
+ * HMAC Final path: pool_acquire → INIT ioctl → write data → FINALIZE
+ * → read MAC.  One injected ioctl failure at the INIT step exercises
+ * the error path that goes to done: before key/data are sent.        */
+#ifdef WOLFSSL_CRYPTO2DEV_SIM
+static int test_hmac_final_init_failure(void)
+{
+    Hmac       hmac;
+    byte       key[20];
+    const byte data[] = { 0x01, 0x02, 0x03, 0x04 };
+    byte       mac[WC_SHA256_DIGEST_SIZE];
+    int        ret;
+    int        hmac_inited = 0;
+
+    ret = wc_crypto2dev_init(0);  /* default pool size */
+    if (ret != 0) return ret;
+    ret = wc_crypto2dev_register();
+    if (ret != 0) { wc_crypto2dev_cleanup(); return ret; }
+
+    XMEMSET(key, 0x0b, sizeof(key));
+    ret = wc_HmacInit(&hmac, NULL, WOLF_CRYPTO2DEV_DEVID);
+    if (ret != 0) goto init_done;
+    hmac_inited = 1;
+    ret = wc_HmacSetKey(&hmac, WC_SHA256, key, (word32)sizeof(key));
+    if (ret != 0) goto init_done;
+    ret = wc_HmacUpdate(&hmac, data, (word32)sizeof(data));
+    if (ret != 0) goto init_done;
+
+    if (hmac.devCtx == NULL) {
+        /* SETKEY did not set devCtx — hardware path not taken; skip. */
+        WOLFSSL_MSG("crypto2dev_test: HMAC devCtx NULL — skipping INIT failure");
+        ret = 0;
+        goto init_done;
+    }
+
+    /* Inject: next ioctl returns -1/ENODEV.  HMAC Final calls
+     * pool_acquire (no ioctl), then CRYPTO2DEV_IOC_INIT — that is
+     * the targeted ioctl.  Reset the counter after the call in case
+     * Final returns before consuming it.
+     *
+     * errno=ENODEV maps to BAD_STATE_E via crypto2dev_to_wc_err.
+     * The test checks for any negative return (hard error), not a
+     * specific code, since the mapping is an implementation detail. */
+    crypto2dev_sim_set_ioctl_fail(1);
+    ret = wc_HmacFinal(&hmac, mac);
+    crypto2dev_sim_set_ioctl_fail(0);
+
+    if (ret >= 0) {
+        WOLFSSL_MSG("crypto2dev_test: HMAC Final INIT failure expected hard error");
+        ret = -1;
+        goto init_done;
+    }
+    ret = 0;
+
+    if (hmac.devCtx != NULL) {
+        WOLFSSL_MSG("crypto2dev_test: HMAC devCtx not freed after INIT failure");
+        ret = -1;
+        goto init_done;
+    }
+
+    WOLFSSL_MSG("crypto2dev_test: HMAC Final INIT ioctl failure test passed");
+
+init_done:
+    if (hmac_inited) wc_HmacFree(&hmac);
+    wc_crypto2dev_cleanup();
+    return ret;
+}
+#endif /* WOLFSSL_CRYPTO2DEV_SIM */
+
+/* Test E3: ECDSA sign returns WC_HW_E when the pool is exhausted by
+ * an in-progress SHA-256 hash holding the only slot.
+ *
+ * Pool is forced to 1.  A P-256 key is imported into a hardware-bound
+ * key object (SETKEY opens a key fd stored in devCtx).  A SHA-256
+ * Update acquires the single pool slot.  wc_ecc_sign_hash then tries
+ * to acquire a slot → exhausted → WC_HW_E.                           */
+#if defined(HAVE_ECC) && defined(WOLF_CRYPTO_CB_SETKEY)
+static int test_ecdsa_sign_pool_exhaustion(void)
+{
+    ecc_key    priv_key;
+    ecc_key    sign_key;
+    wc_Sha256  sha;
+    WC_RNG     rng;
+    byte       digest[WC_SHA256_DIGEST_SIZE];
+    byte       sig[ECC_MAX_SIG_SIZE];
+    word32     sig_len = (word32)sizeof(sig);
+    byte       priv_raw[ECC_MAXSIZE];
+    word32     priv_raw_len;
+    byte       pub_x963[1 + 2 * ECC_MAXSIZE];
+    word32     pub_x963_len;
+    const byte data[] = { 0x01, 0x02, 0x03, 0x04 };
+    int        ret;
+    int        priv_inited = 0;
+    int        sign_inited = 0;
+    int        sha_inited  = 0;
+    int        rng_inited  = 0;
+    int        i;
+
+    for (i = 0; i < WC_SHA256_DIGEST_SIZE; i++)
+        digest[i] = 0xAB;
+
+    ret = wc_crypto2dev_init(1);  /* pool_size=1: single slot */
+    if (ret != 0) return ret;
+    ret = wc_crypto2dev_register();
+    if (ret != 0) { wc_crypto2dev_cleanup(); return ret; }
+
+    ret = wc_InitRng(&rng);
+    if (ret != 0) goto ecdsa_pool_done;
+    rng_inited = 1;
+
+    /* Generate P-256 key with software (INVALID_DEVID). */
+    ret = wc_ecc_init_ex(&priv_key, NULL, INVALID_DEVID);
+    if (ret != 0) goto ecdsa_pool_done;
+    priv_inited = 1;
+    ret = wc_ecc_make_key_ex(&rng, 32, &priv_key, ECC_SECP256R1);
+    if (ret != 0) goto ecdsa_pool_done;
+
+    /* Export and import into a hardware-bound key (SETKEY → devCtx = key fd). */
+    priv_raw_len = (word32)sizeof(priv_raw);
+    pub_x963_len = (word32)sizeof(pub_x963);
+    ret = wc_ecc_export_private_only(&priv_key, priv_raw, &priv_raw_len);
+    if (ret != 0) { XMEMSET(priv_raw, 0, sizeof(priv_raw)); goto ecdsa_pool_done; }
+    ret = wc_ecc_export_x963(&priv_key, pub_x963, &pub_x963_len);
+    if (ret != 0) { XMEMSET(priv_raw, 0, sizeof(priv_raw)); goto ecdsa_pool_done; }
+    ret = wc_ecc_init_ex(&sign_key, NULL, WOLF_CRYPTO2DEV_DEVID);
+    if (ret != 0) { XMEMSET(priv_raw, 0, sizeof(priv_raw)); goto ecdsa_pool_done; }
+    sign_inited = 1;
+    ret = wc_ecc_import_private_key_ex(priv_raw, priv_raw_len,
+                                       pub_x963, pub_x963_len,
+                                       &sign_key, ECC_SECP256R1);
+    XMEMSET(priv_raw, 0, sizeof(priv_raw));
+    if (ret != 0) goto ecdsa_pool_done;
+
+    /* Acquire the only pool slot via SHA-256 Init+Update. */
+    ret = wc_InitSha256_ex(&sha, NULL, WOLF_CRYPTO2DEV_DEVID);
+    if (ret != 0) goto ecdsa_pool_done;
+    sha_inited = 1;
+    ret = wc_Sha256Update(&sha, data, (word32)sizeof(data));
+    if (ret != 0) goto ecdsa_pool_done;
+
+    if (sha.devCtx == NULL) {
+        WOLFSSL_MSG("crypto2dev_test: SHA-256 devCtx NULL — skipping ECDSA pool exhaustion");
+        ret = 0;
+        goto ecdsa_pool_done;
+    }
+
+    /* Sign tries to acquire a pool slot — must fail (pool exhausted). */
+    ret = wc_ecc_sign_hash(digest, sizeof(digest), sig, &sig_len, &rng, &sign_key);
+    if (ret != WC_HW_E) {
+        WOLFSSL_MSG("crypto2dev_test: ECDSA sign pool exhaustion expected WC_HW_E");
+        ret = (ret == 0) ? -1 : ret;
+        goto ecdsa_pool_done;
+    }
+    ret = 0;
+
+    WOLFSSL_MSG("crypto2dev_test: ECDSA sign pool exhaustion test passed");
+
+ecdsa_pool_done:
+    if (sha_inited)  wc_Sha256Free(&sha);
+    if (sign_inited) wc_ecc_free(&sign_key);
+    if (priv_inited) wc_ecc_free(&priv_key);
+    if (rng_inited)  wc_FreeRng(&rng);
+    wc_crypto2dev_cleanup();
+    return ret;
+}
+#endif /* HAVE_ECC && WOLF_CRYPTO_CB_SETKEY */
+
+/* ------------------------------------------------------------------ */
 /* Public entry point                                                   */
 /* ------------------------------------------------------------------ */
 
@@ -822,7 +1819,7 @@ int wc_crypto2dev_test(void)
 {
     int ret;
 
-    ret = wc_crypto2dev_init();
+    ret = wc_crypto2dev_init(0); /* 0 = compile-time default pool size */
     if (ret != 0) {
 #ifdef WOLFSSL_CRYPTO2DEV_SIM
         WOLFSSL_MSG("crypto2dev_test: sim init failed");
@@ -833,8 +1830,7 @@ int wc_crypto2dev_test(void)
 #endif
     }
 
-    ret = wc_CryptoCb_RegisterDevice(WOLF_CRYPTO2DEV_DEVID,
-                                     wc_crypto2dev_cb, NULL);
+    ret = wc_crypto2dev_register();
     if (ret != 0) {
         wc_crypto2dev_cleanup();
         return ret;
@@ -852,6 +1848,14 @@ int wc_crypto2dev_test(void)
         goto done;
     }
 
+#ifdef WOLFSSL_AES_COUNTER
+    ret = test_aes_ctr_multicall();
+    if (ret != 0) {
+        WOLFSSL_MSG("crypto2dev_test: AES-CTR multi-call KAT FAILED");
+        goto done;
+    }
+#endif
+
     ret = test_hmac_sha256();
     if (ret != 0) {
         WOLFSSL_MSG("crypto2dev_test: HMAC-SHA256 KAT FAILED");
@@ -864,10 +1868,52 @@ int wc_crypto2dev_test(void)
         goto done;
     }
 
+    ret = test_hmac_short_key_fallback();
+    if (ret != 0) {
+        WOLFSSL_MSG("crypto2dev_test: HMAC short-key fallback FAILED");
+        goto done;
+    }
+
+    ret = test_hmac_oversized();
+    if (ret != 0) {
+        WOLFSSL_MSG("crypto2dev_test: HMAC oversized-input rejection FAILED");
+        goto done;
+    }
+
+    ret = test_hmac_lifecycle();
+    if (ret != 0) {
+        WOLFSSL_MSG("crypto2dev_test: HMAC lifecycle FAILED");
+        goto done;
+    }
+
 #ifdef HAVE_AESGCM
     ret = test_aesgcm_empty();
     if (ret != 0) {
         WOLFSSL_MSG("crypto2dev_test: AES-GCM empty-plaintext KAT FAILED");
+        goto done;
+    }
+
+    ret = test_aesgcm_oversized_aad();
+    if (ret != 0) {
+        WOLFSSL_MSG("crypto2dev_test: AES-GCM oversized-AAD rejection FAILED");
+        goto done;
+    }
+
+    ret = test_aesgcm_truncated_tag();
+    if (ret != 0) {
+        WOLFSSL_MSG("crypto2dev_test: AES-GCM truncated-tag KAT FAILED");
+        goto done;
+    }
+
+    ret = test_aesgcm_sub_min_tag();
+    if (ret != 0) {
+        WOLFSSL_MSG("crypto2dev_test: AES-GCM sub-minimum tag rejection FAILED");
+        goto done;
+    }
+
+    ret = test_aesgcm_oversized_tag();
+    if (ret != 0) {
+        WOLFSSL_MSG("crypto2dev_test: AES-GCM oversized-tag rejection FAILED");
         goto done;
     }
 #endif
@@ -879,14 +1925,36 @@ int wc_crypto2dev_test(void)
         WOLFSSL_MSG("crypto2dev_test: ECDSA round-trip FAILED");
         goto done;
     }
+
+    ret = test_ecc_setkey_rejects_p192();
+    if (ret != 0) {
+        WOLFSSL_MSG("crypto2dev_test: ECC P-192 hardware rejection FAILED");
+        goto done;
+    }
 #endif
+#endif
+
+#if defined(WOLF_CRYPTO_CB_COPY) && defined(WOLF_CRYPTO_CB_SETKEY)
+    ret = test_aes_copy_devctx_guard();
+    if (ret != 0) {
+        WOLFSSL_MSG("crypto2dev_test: AES COPY devCtx guard FAILED");
+        goto done;
+    }
+#endif
+
+#if defined(WOLF_CRYPTO_CB_COPY) && defined(WOLF_CRYPTO_CB_SETKEY) && !defined(NO_HMAC)
+    ret = test_hmac_copy_devctx_guard();
+    if (ret != 0) {
+        WOLFSSL_MSG("crypto2dev_test: HMAC COPY devCtx guard FAILED");
+        goto done;
+    }
 #endif
 
 #ifdef WOLFSSL_TLS13
 #ifndef NO_WOLFSSL_CLIENT
-    ret = test_tls13_integration();
+    ret = test_tls13_devid_and_primitive_routing();
     if (ret != 0) {
-        WOLFSSL_MSG("crypto2dev_test: TLS 1.3 integration FAILED");
+        WOLFSSL_MSG("crypto2dev_test: TLS 1.3 devId and primitive routing FAILED");
         goto done;
     }
 #endif
@@ -901,8 +1969,32 @@ int wc_crypto2dev_test(void)
 #endif
 
 done:
-    wc_CryptoCb_UnRegisterDevice(WOLF_CRYPTO2DEV_DEVID);
-    wc_crypto2dev_cleanup();
+    wc_crypto2dev_cleanup(); /* unregisters WOLF_CRYPTO2DEV_DEVID automatically */
+    if (ret != 0)
+        return ret;
+
+    ret = test_hmac_final_pool_exhaustion();
+    if (ret != 0) {
+        WOLFSSL_MSG("crypto2dev_test: HMAC Final pool exhaustion FAILED");
+        return ret;
+    }
+
+#ifdef WOLFSSL_CRYPTO2DEV_SIM
+    ret = test_hmac_final_init_failure();
+    if (ret != 0) {
+        WOLFSSL_MSG("crypto2dev_test: HMAC Final INIT ioctl failure FAILED");
+        return ret;
+    }
+#endif
+
+#if defined(HAVE_ECC) && defined(WOLF_CRYPTO_CB_SETKEY)
+    ret = test_ecdsa_sign_pool_exhaustion();
+    if (ret != 0) {
+        WOLFSSL_MSG("crypto2dev_test: ECDSA sign pool exhaustion FAILED");
+        return ret;
+    }
+#endif
+
     return ret;
 }
 

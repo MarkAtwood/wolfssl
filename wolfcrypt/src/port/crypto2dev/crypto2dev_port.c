@@ -25,7 +25,7 @@
  * Build guards: WOLFSSL_CRYPTO2DEV && WOLF_CRYPTO_CB
  *
  * Usage:
- *   wc_crypto2dev_init();
+ *   wc_crypto2dev_init(0);  (0 = use compile-time default pool size)
  *   wc_CryptoCb_RegisterDevice(WOLF_CRYPTO2DEV_DEVID, wc_crypto2dev_cb, NULL);
  *   wc_InitRng_ex(&rng, NULL, WOLF_CRYPTO2DEV_DEVID);
  *   ...
@@ -69,184 +69,14 @@
 #include <sys/ioctl.h>
 #include <errno.h>
 
+/* Wire structs and ioctl request codes shared with the software simulator.
+ * Both files include this header so the _IOW/_IOR macros encode the same
+ * sizeof(struct), guaranteeing matching ioctl request codes. */
+#include <wolfssl/wolfcrypt/port/crypto2dev/crypto2dev_wire.h>
+
 #ifdef WOLFSSL_CRYPTO2DEV_SIM
 #include <wolfssl/wolfcrypt/port/crypto2dev/crypto2dev_sim.h>
 #endif
-
-/* Minimum crypto2dev constants needed for KEY fd lifecycle.
- * Full ioctl definitions are in ~/WORK/WOLFKM/include/uapi/crypto2dev_ioctl.h.
- * We replicate only what is used here to avoid a build-time dependency on
- * the out-of-tree header. */
-#ifndef CRYPTO2DEV_IOC_MAGIC
-#define CRYPTO2DEV_IOC_MAGIC         ((unsigned char)0xC2)
-#endif
-#ifndef CRYPTO2DEV_ALGO_MAXLEN
-#define CRYPTO2DEV_ALGO_MAXLEN       32
-#endif
-#ifndef CRYPTO2DEV_PROVIDER_MAXLEN
-#define CRYPTO2DEV_PROVIDER_MAXLEN   32
-#endif
-#ifndef CRYPTO2DEV_KEY_PRIVATE
-#define CRYPTO2DEV_KEY_PRIVATE       1
-#define CRYPTO2DEV_KEY_PUBLIC        2
-#define CRYPTO2DEV_KEY_PAIR          3
-#define CRYPTO2DEV_KEY_SYMMETRIC     4
-#endif
-#ifndef CRYPTO2DEV_KEY_IMPORT_MAXLEN
-#define CRYPTO2DEV_KEY_IMPORT_MAXLEN 8192
-#endif
-
-struct crypto2dev_key_import_op {
-    char  algo    [CRYPTO2DEV_ALGO_MAXLEN];
-    char  provider[CRYPTO2DEV_PROVIDER_MAXLEN];
-    unsigned int key_type;
-    unsigned int exportable;
-    unsigned int keylen;
-    unsigned char _pad[4];
-};
-#ifndef CRYPTO2DEV_IOC_KEY_IMPORT
-#define CRYPTO2DEV_IOC_KEY_IMPORT  _IOW(CRYPTO2DEV_IOC_MAGIC, 11, \
-                                        struct crypto2dev_key_import_op)
-#endif
-
-/* OPERATION fd lifecycle */
-#ifndef CRYPTO2DEV_KEY_MAXLEN
-#define CRYPTO2DEV_KEY_MAXLEN          128   /* max inline key in INIT */
-#endif
-#ifndef CRYPTO2DEV_IV_MAXLEN
-#define CRYPTO2DEV_IV_MAXLEN           32
-#endif
-#ifndef CRYPTO2DEV_AAD_MAXLEN
-#define CRYPTO2DEV_AAD_MAXLEN          256
-#endif
-#ifndef CRYPTO2DEV_TAG_MAXLEN
-#define CRYPTO2DEV_TAG_MAXLEN          16
-#endif
-#ifndef CRYPTO2DEV_HASH_MAXLEN
-#define CRYPTO2DEV_HASH_MAXLEN         64    /* max digest: SHA-512 = 64 bytes */
-#endif
-#ifndef CRYPTO2DEV_SIG_MAXLEN
-#define CRYPTO2DEV_SIG_MAXLEN          512   /* max sig: RSA-4096 DER = 512 bytes */
-#endif
-#ifndef CRYPTO2DEV_PUBKEY_MAXLEN
-#define CRYPTO2DEV_PUBKEY_MAXLEN       256
-#endif
-#ifndef CRYPTO2DEV_KDF_SALT_MAXLEN
-#define CRYPTO2DEV_KDF_SALT_MAXLEN     64
-#endif
-#ifndef CRYPTO2DEV_KDF_INFO_MAXLEN
-#define CRYPTO2DEV_KDF_INFO_MAXLEN     256
-#endif
-#ifndef CRYPTO2DEV_KDF_OKM_MAXLEN
-#define CRYPTO2DEV_KDF_OKM_MAXLEN      64
-#endif
-
-#ifndef CRYPTO2DEV_OP_ENCRYPT
-#define CRYPTO2DEV_OP_ENCRYPT          1
-#define CRYPTO2DEV_OP_DECRYPT          2
-#define CRYPTO2DEV_OP_HASH             3
-#endif
-
-/* OPERATION fd ioctls */
-#ifndef CRYPTO2DEV_IOC_INIT
-#define CRYPTO2DEV_IOC_INIT     _IOW(CRYPTO2DEV_IOC_MAGIC, 1,  struct crypto2dev_init_op)
-#define CRYPTO2DEV_IOC_SET_IV   _IOW(CRYPTO2DEV_IOC_MAGIC, 2,  struct crypto2dev_iv_op)
-#define CRYPTO2DEV_IOC_SET_AAD  _IOW(CRYPTO2DEV_IOC_MAGIC, 3,  struct crypto2dev_aad_op)
-#define CRYPTO2DEV_IOC_GET_TAG  _IOR(CRYPTO2DEV_IOC_MAGIC, 4,  struct crypto2dev_tag_op)
-#define CRYPTO2DEV_IOC_SET_TAG  _IOW(CRYPTO2DEV_IOC_MAGIC, 5,  struct crypto2dev_tag_op)
-#define CRYPTO2DEV_IOC_RESET    _IO( CRYPTO2DEV_IOC_MAGIC, 19)
-#define CRYPTO2DEV_IOC_REQUIRE_FIPS _IO(CRYPTO2DEV_IOC_MAGIC, 20)
-#define CRYPTO2DEV_IOC_FINALIZE _IO( CRYPTO2DEV_IOC_MAGIC, 21)
-#define CRYPTO2DEV_IOC_DO_KDF   _IOWR(CRYPTO2DEV_IOC_MAGIC, 22, struct crypto2dev_kdf_op)
-#endif
-
-/* Asymmetric ioctls */
-#ifndef CRYPTO2DEV_IOC_KEY_GENERATE
-#define CRYPTO2DEV_IOC_KEY_GENERATE \
-    _IOW(CRYPTO2DEV_IOC_MAGIC, 12, struct crypto2dev_key_generate_op)
-#define CRYPTO2DEV_IOC_DO_SIGN   _IOWR(CRYPTO2DEV_IOC_MAGIC, 16, struct crypto2dev_sign_op)
-#define CRYPTO2DEV_IOC_DO_VERIFY _IOWR(CRYPTO2DEV_IOC_MAGIC, 17, struct crypto2dev_verify_op)
-#define CRYPTO2DEV_IOC_DO_AGREE  _IOWR(CRYPTO2DEV_IOC_MAGIC, 18, struct crypto2dev_agree_op)
-#endif
-
-struct crypto2dev_init_op {
-    char          algo    [CRYPTO2DEV_ALGO_MAXLEN];
-    char          provider[CRYPTO2DEV_PROVIDER_MAXLEN];
-    unsigned int  op;
-    unsigned int  keylen;
-    unsigned char key[CRYPTO2DEV_KEY_MAXLEN];
-    int           key_fd;
-    unsigned char _pad[4];
-};
-
-struct crypto2dev_iv_op {
-    unsigned char iv[CRYPTO2DEV_IV_MAXLEN];
-    unsigned int  ivlen;
-};
-
-struct crypto2dev_aad_op {
-    unsigned char aad[CRYPTO2DEV_AAD_MAXLEN];
-    unsigned int  aadlen;
-};
-
-struct crypto2dev_tag_op {
-    unsigned char tag[CRYPTO2DEV_TAG_MAXLEN];
-    unsigned int  taglen;
-};
-
-struct crypto2dev_sign_op {
-    int           key_fd;
-    unsigned char _pad[4];
-    char          hash_algo[CRYPTO2DEV_ALGO_MAXLEN];
-    unsigned int  digest_len;
-    unsigned char digest[CRYPTO2DEV_HASH_MAXLEN];
-    unsigned int  sig_len;
-    unsigned char sig[CRYPTO2DEV_SIG_MAXLEN];
-};
-
-struct crypto2dev_verify_op {
-    int           key_fd;
-    unsigned char _pad[4];
-    char          hash_algo[CRYPTO2DEV_ALGO_MAXLEN];
-    unsigned int  digest_len;
-    unsigned char digest[CRYPTO2DEV_HASH_MAXLEN];
-    unsigned int  sig_len;
-    unsigned char sig[CRYPTO2DEV_SIG_MAXLEN];
-};
-
-struct crypto2dev_agree_op {
-    int           key_fd;
-    unsigned char _pad[4];
-    unsigned int  peer_pubkey_len;
-    unsigned char peer_pubkey[CRYPTO2DEV_PUBKEY_MAXLEN];
-    unsigned int  salt_len;
-    unsigned char salt[CRYPTO2DEV_KDF_SALT_MAXLEN];
-    unsigned int  info_len;
-    unsigned char info[CRYPTO2DEV_KDF_INFO_MAXLEN];
-    unsigned int  okm_len;
-    unsigned char okm[CRYPTO2DEV_PUBKEY_MAXLEN];
-};
-
-struct crypto2dev_key_generate_op {
-    char          algo    [CRYPTO2DEV_ALGO_MAXLEN];
-    char          provider[CRYPTO2DEV_PROVIDER_MAXLEN];
-    unsigned int  exportable;
-    unsigned char _pad[4];
-};
-
-struct crypto2dev_kdf_op {
-    char          algo    [CRYPTO2DEV_ALGO_MAXLEN];
-    char          out_algo[CRYPTO2DEV_ALGO_MAXLEN];
-    unsigned char salt    [CRYPTO2DEV_KDF_SALT_MAXLEN];
-    unsigned int  salt_len;
-    unsigned char info    [CRYPTO2DEV_KDF_INFO_MAXLEN];
-    unsigned int  info_len;
-    unsigned int  okm_len;
-    unsigned int  iterations;
-    int           ikm_fd;
-    unsigned char exportable;
-    unsigned char _pad[3];
-};
 
 /* Per-object context structs for devCtx fields.
  * Allocated with XMALLOC(DYNAMIC_TYPE_TMP_BUFFER), freed in FREE callback. */
@@ -260,15 +90,24 @@ typedef struct {
     byte   key[128];  /* raw HMAC key bytes (up to SHA-384/SHA-512 block size = 128 bytes) */
     word32 keySz;
     char   algo[CRYPTO2DEV_ALGO_MAXLEN]; /* e.g., "hmac(sha256)" */
-    /* Streaming accumulation buffer — appended on each Update, flushed on Final. */
+    /* Streaming accumulation buffer — appended on each Update, flushed on Final.
+     * dataCap is the allocated size; dataSz is the used size.  The buffer grows
+     * by doubling so total copy work across N updates is O(total input) not O(N²). */
     byte*  data;
     word32 dataSz;
+    word32 dataCap;
+    /* Anti-aliasing guard: set to the owning Hmac* at allocation time.
+     * Detected in crypto2dev_free_hmac and the SETKEY re-key path to prevent
+     * double-free when wc_HmacCopy shallow-copies devCtx without calling the
+     * CryptoCb COPY handler.  See wolfssl-qsi.2. */
+    void*  owner;
 } Crypto2DevHmacCtx;
 
 typedef struct {
-    int  op_fd;                           /* open OPERATION fd; -1 = not started */
-    int  pool_slot;                       /* pool slot index for op_fd */
-    char algo[CRYPTO2DEV_ALGO_MAXLEN];    /* e.g., "sha256" */
+    int  op_fd;      /* open OPERATION fd; -1 = not started */
+    int  pool_slot;  /* pool slot index for op_fd */
+    /* algo name not stored: INIT is sent once at ctx creation using a local
+     * variable; subsequent writes/reads use op_fd directly. */
 } Crypto2DevHashCtx;
 
 /* Ensure error codes are distinct — crypto2dev relies on this. */
@@ -291,33 +130,65 @@ static int crypto2dev_hmac_setkey_ctx(const wc_CryptoInfo* info);
  * The caller is responsible for deciding whether the resulting code should
  * be returned directly (hard failure) or converted to CRYPTOCB_UNAVAILABLE
  * (software fallback). Specifically:
- *   NOT_COMPILED_IN  — algo/op not supported: caller should return
- *                      CRYPTOCB_UNAVAILABLE to allow software fallback.
- *   BAD_FUNC_ARG     — invalid argument; also used for ENOENT (algo absent),
- *                      which the caller may promote to CRYPTOCB_UNAVAILABLE.
+ *   NOT_COMPILED_IN  — algo/op not supported (EOPNOTSUPP, ENOSYS) or no
+ *                      provider registered for this algo (ENOENT): callers
+ *                      in cipher/hash INIT paths promote this to
+ *                      CRYPTOCB_UNAVAILABLE for software fallback.
+ *                      HMAC Final callers promote it to WC_HW_E instead to
+ *                      prevent a MAC bypass (Updates already claimed).
+ *   BAD_FUNC_ARG     — invalid argument passed to the ioctl (EINVAL, EFAULT).
  */
 static int crypto2dev_to_wc_err(int errnum)
 {
+    int ret;
     switch (errnum) {
-        case EINVAL:     return BAD_FUNC_ARG;
-        case ENOENT:     return BAD_FUNC_ARG;
-        case EACCES:     return FIPS_NOT_ALLOWED_E;
-        case ENODEV:     return BAD_STATE_E;
-        case EBUSY:      return BAD_STATE_E;
+        /* Expected-fallback signals: do not log — these are normal operational
+         * paths (algo not compiled in, device gracefully declines). */
+        case ENOENT:     return NOT_COMPILED_IN; /* no provider for this algo */
         case EOPNOTSUPP: return NOT_COMPILED_IN;
         case ENOSYS:     return NOT_COMPILED_IN;
-        case EMSGSIZE:   return BUFFER_E;
+        /* Authentication tag mismatch on GCM decrypt: expected and handled by
+         * the caller; not a hardware fault. */
         case EBADMSG:    return AES_GCM_AUTH_E;
-        case EIO:        return WC_HW_E;
-        case ENOMEM:     return MEMORY_E;
-        case EFAULT:     return BAD_FUNC_ARG;
-        default:         return WC_HW_E;
+        /* Hard errors: log with errno so support can distinguish FIPS degradation
+         * (EACCES → FIPS_NOT_ALLOWED_E), resource exhaustion (ENOMEM), device
+         * faults (EIO), etc. without a debugger. */
+        case EACCES:  ret = FIPS_NOT_ALLOWED_E; break;
+        case ENODEV:  ret = BAD_STATE_E;        break;
+        case EBUSY:   ret = BAD_STATE_E;        break;
+        case EMSGSIZE:ret = BUFFER_E;           break;
+        case EIO:     ret = WC_HW_E;            break;
+        case ENOMEM:  ret = MEMORY_E;           break;
+        case EINVAL:  ret = BAD_FUNC_ARG;       break;
+        case EFAULT:  ret = BAD_FUNC_ARG;       break;
+        default:      ret = WC_HW_E;            break;
     }
+    if (ret == FIPS_NOT_ALLOWED_E) {
+        WOLFSSL_MSG_EX("crypto2dev: FIPS not allowed — device blocked operation "
+                       "(EACCES errno=%d)", errnum);
+    } else {
+        WOLFSSL_MSG_EX("crypto2dev: ioctl failed errno=%d (wc_err=%d)", errnum, ret);
+    }
+    return ret;
 }
 
-/* Global device fd. -1 = not open. */
-static int g_crypto2dev_fd = -1;
-
+/* Number of pre-opened operation fds held ready for cipher and hash calls.
+ * Each concurrent AES/hash operation consumes one slot; if all slots are in
+ * use the call fails with WC_HW_E immediately (no blocking wait).
+ *
+ * Sizing guidance:
+ *   - Set this to the maximum number of AES/hash ops that may be in flight
+ *     simultaneously across all threads.
+ *   - A TLS server handling N sessions concurrently needs at least N slots
+ *     for record-layer AES-GCM (each in-flight record holds one slot).
+ *   - Streaming hash (SHA-256/384/512 with hardware hash enabled) holds a
+ *     slot from Init to Final.  Each in-progress wc_Sha256Update/Final cycle
+ *     occupies one slot.  Add these to the AES count when sizing.
+ *     NOTE: in TLS-safe mode (wc_crypto2dev_assign_devid was called), hash
+ *     ops return CRYPTOCB_UNAVAILABLE immediately and do NOT consume pool
+ *     slots, so only AES slots need to be counted for TLS use cases.
+ *   - Under-sizing causes WC_HW_E returns that look like hardware failures;
+ *     increase the value and recompile to fix.  Slots cost one open fd each. */
 #ifndef WOLFSSL_CRYPTO2DEV_POOL_SIZE
 #define WOLFSSL_CRYPTO2DEV_POOL_SIZE 8
 #endif
@@ -336,18 +207,37 @@ typedef struct {
 static Crypto2DevPool g_pool;
 static int g_pool_inited = 0;
 
-/* When non-zero, WC_ALGO_TYPE_HASH returns CRYPTOCB_UNAVAILABLE so that TLS
- * transcript-hash objects fall through to software. This avoids the
- * wc_Sha256Copy failure that occurs when hardware holds streaming state.
- * Set by wc_crypto2dev_assign_devid(). HMAC, CIPHER, and PK are unaffected.
- *
- * Single-threaded initialisation: this flag is written by
- * wc_crypto2dev_assign_devid() and must be set before any concurrent thread
- * invokes the registered callback. */
-static int g_tls_safe_mode = 0;
+/* Per-devId configuration, heap-allocated at registration time and passed as
+ * the ctx parameter to wc_CryptoCb_RegisterDevice().  The callback receives it
+ * back as ctx, providing O(1) per-devId state access without a table lookup.
+ * tls_safe == 1: WC_ALGO_TYPE_HASH returns CRYPTOCB_UNAVAILABLE for this devId
+ *   so TLS 1.3 transcript hashing falls back to software (where wc_Sha256Copy
+ *   works) while HMAC, CIPHER, and PK remain on hardware. */
+typedef struct {
+    int tls_safe;
+} Crypto2DevConfig;
 
-static wolfSSL_Mutex g_ecdsa_fd_lock;
-static int           g_ecdsa_fd_lock_inited = 0;
+/* Cleanup tracking table: records each {devId, cfg*} registered by this port
+ * so wc_crypto2dev_cleanup() can unregister and free them.  Only devIds
+ * registered through wc_crypto2dev_register_ex() or
+ * wc_crypto2dev_assign_devid_ex() appear here; devIds the application
+ * registered directly via wc_CryptoCb_RegisterDevice() are untouched. */
+typedef struct {
+    int              devId;
+    Crypto2DevConfig* cfg;
+} Crypto2DevIdEntry;
+static Crypto2DevIdEntry g_devid_table[WOLFSSL_CRYPTO2DEV_MAX_DEVIDS];
+static int g_devid_count = 0;
+
+static int crypto2dev_find_devid(int devId)
+{
+    int i;
+    for (i = 0; i < g_devid_count; i++) {
+        if (g_devid_table[i].devId == devId)
+            return i;
+    }
+    return -1;
+}
 
 static int crypto2dev_pool_init(Crypto2DevPool* pool, int capacity)
 {
@@ -415,27 +305,73 @@ static int crypto2dev_pool_acquire(Crypto2DevPool* pool, int* out_slot_idx)
 {
     int i;
     int fd = -1;
+    int empty_slot = -1;
 
-    if (pool->slots == NULL || out_slot_idx == NULL)
+    if (out_slot_idx == NULL)
         return -1;
+    if (pool->slots == NULL) {
+        /* Pool was never initialised or was destroyed by wc_crypto2dev_cleanup().
+         * Log a specific message so support can distinguish this from a full
+         * pool (all slots in use).  A full pool returns -1 silently here and
+         * the caller logs "pool exhausted"; a destroyed pool logs this message
+         * and the caller message is suppressed by the g_pool.slots != NULL
+         * guard at each call site. */
+        WOLFSSL_MSG("crypto2dev: pool not initialised — call wc_crypto2dev_init() "
+                    "before use; or wc_crypto2dev_cleanup() was called while "
+                    "objects with active devCtx are still live");
+        return -1;
+    }
 
     if (wc_LockMutex(&pool->lock) != 0)
         return -1;
+
+    /* Prefer a slot with a ready fd (fast path). */
     for (i = 0; i < pool->capacity; i++) {
         if (pool->slots[i].in_use)
             continue;
-        if (pool->slots[i].fd < 0) {
-            /* Attempt to recover a slot that failed to reopen at release time. */
-            pool->slots[i].fd = open(CRYPTO2DEV_PATH, O_RDWR | O_CLOEXEC);
-            if (pool->slots[i].fd < 0)
-                continue;
+        if (pool->slots[i].fd >= 0) {
+            pool->slots[i].in_use = 1;
+            fd = pool->slots[i].fd;
+            /* Clear fd so that a concurrent cleanup() sees -1 and does
+             * not double-close the fd we just handed to the caller. */
+            pool->slots[i].fd = -1;
+            *out_slot_idx = i;
+            break;
         }
-        pool->slots[i].in_use = 1;
-        fd = pool->slots[i].fd;
-        *out_slot_idx = i;
-        break;
+        /* Remember first empty slot for potential recovery below. */
+        if (empty_slot < 0)
+            empty_slot = i;
     }
+
+    if (fd < 0 && empty_slot >= 0) {
+        /* Reserve the slot so no other thread claims it while we open
+         * outside the mutex.  open() may block; don't hold the lock.
+         * Transient exhaustion: during the open() call below, this slot
+         * is marked in_use=1 with fd==-1.  A concurrent acquire() that
+         * finds all slots in_use returns -1 (WC_HW_E) even though one is
+         * only temporarily unavailable.  This is expected: the caller
+         * sees a full pool for the duration of the open() syscall.  It is
+         * not a persistent failure — retrying at the next operation will
+         * succeed once the slot is released. */
+        pool->slots[empty_slot].in_use = 1;
+    }
+
     wc_UnLockMutex(&pool->lock);
+
+    if (fd < 0 && empty_slot >= 0) {
+        int new_fd = open(CRYPTO2DEV_PATH, O_RDWR | O_CLOEXEC);
+        if (new_fd >= 0) {
+            fd = new_fd;
+            *out_slot_idx = empty_slot;
+            /* fd is not stored in the slot (double-close protection);
+             * it will be returned to the caller directly. */
+        } else {
+            /* Open failed: release the reservation for the next attempt. */
+            wc_LockMutex(&pool->lock);
+            pool->slots[empty_slot].in_use = 0;
+            wc_UnLockMutex(&pool->lock);
+        }
+    }
 
     return fd;
 }
@@ -528,20 +464,22 @@ static int crypto2dev_setkey(const wc_CryptoInfo* info)
             if (key == NULL || src == NULL || field_sz == 0 ||
                     field_sz > ECC_MAXSIZE)
                 return BAD_FUNC_ARG;
+            /* FIPS 140-3 IG D.1: minimum approved curve for ECDSA is P-256
+             * (32-byte field).  P-192 (24) and P-224 (28) are not approved;
+             * fall back to software so the FIPS policy stays at wolfCrypt. */
+            if (field_sz < 32)
+                return CRYPTOCB_UNAVAILABLE;
             ret = wc_ecc_export_private_only(src, raw, &field_sz);
-            if (ret != 0)
+            if (ret != 0) {
+                ForceZero(raw, sizeof(raw));
                 return ret;
+            }
             devctx_ptr = (void**)&key->devCtx;
             new_fd = crypto2dev_key_import("ecdsa", CRYPTO2DEV_KEY_PRIVATE,
                                             raw, field_sz);
             ForceZero(raw, sizeof(raw));
-            if (new_fd < 0) {
-                if (*devctx_ptr != NULL) {
-                    close((int)(intptr_t)*devctx_ptr);
-                    *devctx_ptr = NULL;
-                }
-                return new_fd;
-            }
+            if (new_fd < 0)
+                return new_fd; /* preserve existing key fd; new import failed */
             break;
         }
         case WC_SETKEY_ECC_PUB: {
@@ -554,55 +492,32 @@ static int crypto2dev_setkey(const wc_CryptoInfo* info)
             ret = wc_ecc_export_x963(src, raw, &raw_len);
             if (ret != 0)
                 return ret;
+            /* FIPS 140-3 IG D.1: minimum approved curve for ECDSA is P-256.
+             * P-256 uncompressed point: 0x04 || 32-byte X || 32-byte Y = 65.
+             * P-224 = 57, P-192 = 49.  Reject below 65 bytes. */
+            if (raw_len < 65) {
+                ForceZero(raw, sizeof(raw));
+                return CRYPTOCB_UNAVAILABLE;
+            }
             devctx_ptr = (void**)&key->devCtx;
             new_fd = crypto2dev_key_import("ecdsa", CRYPTO2DEV_KEY_PUBLIC,
                                             raw, raw_len);
             ForceZero(raw, sizeof(raw));
-            if (new_fd < 0) {
-                if (*devctx_ptr != NULL) {
-                    close((int)(intptr_t)*devctx_ptr);
-                    *devctx_ptr = NULL;
-                }
-                return new_fd;
-            }
+            if (new_fd < 0)
+                return new_fd; /* preserve existing key fd; new import failed */
             break;
         }
-        case WC_SETKEY_RSA_PRIV: {
-            RsaKey* key = (RsaKey*)info->setkey.obj;
-            byte*   der = (byte*)info->setkey.key;
-            word32  der_len = info->setkey.keySz;
-            if (key == NULL || der == NULL || der_len == 0)
-                return BAD_FUNC_ARG;
-            devctx_ptr = (void**)&key->devCtx;
-            new_fd = crypto2dev_key_import("rsa", CRYPTO2DEV_KEY_PRIVATE,
-                                            der, der_len);
-            if (new_fd < 0) {
-                if (*devctx_ptr != NULL) {
-                    close((int)(intptr_t)*devctx_ptr);
-                    *devctx_ptr = NULL;
-                }
-                return new_fd;
-            }
-            break;
-        }
-        case WC_SETKEY_RSA_PUB: {
-            RsaKey* key = (RsaKey*)info->setkey.obj;
-            byte*   der = (byte*)info->setkey.key;
-            word32  der_len = info->setkey.keySz;
-            if (key == NULL || der == NULL || der_len == 0)
-                return BAD_FUNC_ARG;
-            devctx_ptr = (void**)&key->devCtx;
-            new_fd = crypto2dev_key_import("rsa", CRYPTO2DEV_KEY_PUBLIC,
-                                            der, der_len);
-            if (new_fd < 0) {
-                if (*devctx_ptr != NULL) {
-                    close((int)(intptr_t)*devctx_ptr);
-                    *devctx_ptr = NULL;
-                }
-                return new_fd;
-            }
-            break;
-        }
+        case WC_SETKEY_RSA_PRIV:
+        case WC_SETKEY_RSA_PUB:
+            /* RSA is not implemented in this port: crypto2dev_rsa() always
+             * returns CRYPTOCB_UNAVAILABLE because wc_CryptoCb_Rsa() passes
+             * a pre-padded DigestInfo block, not the raw digest that
+             * CRYPTO2DEV_IOC_DO_SIGN expects (see crypto2dev_rsa comment below).
+             * Do not import the key to the device — there is no operation
+             * that would use the resulting fd, and leaving an open fd in
+             * key->devCtx would mislead callers into thinking hardware RSA
+             * is active.  Fall back to software for the full RSA lifecycle. */
+            return CRYPTOCB_UNAVAILABLE;
         case WC_SETKEY_AES:
             return crypto2dev_aes_setkey_ctx(info);
 #ifndef NO_HMAC
@@ -687,23 +602,25 @@ static int crypto2dev_aes_setkey_ctx(const wc_CryptoInfo* info)
     aes->devCtx = ctx;
     aes->keylen = (int)keySz;
 
-    /* wc_AesSetKey() returns immediately when SETKEY returns 0, skipping the
-     * software path that copies iv into aes->reg.  AES-CBC reads aes->reg for
-     * the IV at encryption time, so we must mirror that copy here. */
-    XMEMSET(aes->reg, 0, AES_BLOCK_SIZE);
-    if (info->setkey.aux != NULL && info->setkey.auxSz > 0 &&
-            info->setkey.auxSz <= AES_BLOCK_SIZE)
-        XMEMCPY(aes->reg, info->setkey.aux, info->setkey.auxSz);
-
-    return 0;
+    /* Return CRYPTOCB_UNAVAILABLE so wolfSSL also runs the software key
+     * schedule.  This sets aes->rounds, which wc_AesGcmSetKey needs in order
+     * to pre-compute the GCM H-subkey.  Without it, any caller using the
+     * standard wc_AesGcmSetKey + wc_AesGcmEncrypt pattern would get
+     * KEYUSAGE_E at the first encrypt with no obvious diagnostic.
+     * The hardware cipher path (crypto2dev_cipher) checks devCtx first and
+     * uses the device regardless of what the software schedule set. */
+    return CRYPTOCB_UNAVAILABLE;
 }
 #endif /* WOLF_CRYPTO_CB_SETKEY */
 
 static int crypto2dev_cipher(const wc_CryptoInfo* info)
 {
-    const Aes* aes = NULL;
+    Aes* aes = NULL;
     const Crypto2DevAesCtx* ctx = NULL;
     const char* algo = NULL;
+    const byte* in_buf  = NULL;
+    byte*       out_buf = NULL;
+    word32      data_sz = 0;
     int op_fd = -1;
     int pool_slot = -1;
     int ret = 0;
@@ -719,32 +636,44 @@ static int crypto2dev_cipher(const wc_CryptoInfo* info)
     switch (info->cipher.type) {
 #ifdef HAVE_AES_CBC
         case WC_CIPHER_AES_CBC:
-            aes  = info->cipher.aescbc.aes;
-            algo = "cbc(aes)";
-            iv   = (const byte*)info->cipher.aescbc.aes->reg;
-            ivSz = AES_BLOCK_SIZE;
+            aes     = info->cipher.aescbc.aes;
+            algo    = "cbc(aes)";
+            iv      = (const byte*)info->cipher.aescbc.aes->reg;
+            ivSz    = AES_BLOCK_SIZE;
+            in_buf  = info->cipher.aescbc.in;
+            out_buf = info->cipher.aescbc.out;
+            data_sz = info->cipher.aescbc.sz;
             break;
 #endif
 #ifdef HAVE_AESGCM
         case WC_CIPHER_AES_GCM:
             if (is_enc) {
-                aes  = info->cipher.aesgcm_enc.aes;
-                iv   = info->cipher.aesgcm_enc.iv;
-                ivSz = info->cipher.aesgcm_enc.ivSz;
+                aes     = info->cipher.aesgcm_enc.aes;
+                iv      = info->cipher.aesgcm_enc.iv;
+                ivSz    = info->cipher.aesgcm_enc.ivSz;
+                in_buf  = info->cipher.aesgcm_enc.in;
+                out_buf = info->cipher.aesgcm_enc.out;
+                data_sz = info->cipher.aesgcm_enc.sz;
             } else {
-                aes  = info->cipher.aesgcm_dec.aes;
-                iv   = info->cipher.aesgcm_dec.iv;
-                ivSz = info->cipher.aesgcm_dec.ivSz;
+                aes     = info->cipher.aesgcm_dec.aes;
+                iv      = info->cipher.aesgcm_dec.iv;
+                ivSz    = info->cipher.aesgcm_dec.ivSz;
+                in_buf  = info->cipher.aesgcm_dec.in;
+                out_buf = info->cipher.aesgcm_dec.out;
+                data_sz = info->cipher.aesgcm_dec.sz;
             }
             algo = "gcm(aes)";
             break;
 #endif
 #ifdef WOLFSSL_AES_COUNTER
         case WC_CIPHER_AES_CTR:
-            aes  = info->cipher.aesctr.aes;
-            algo = "ctr(aes)";
-            iv   = info->cipher.aesctr.aes->reg;
-            ivSz = AES_BLOCK_SIZE;
+            aes     = info->cipher.aesctr.aes;
+            algo    = "ctr(aes)";
+            iv      = (const byte*)info->cipher.aesctr.aes->reg;
+            ivSz    = AES_BLOCK_SIZE;
+            in_buf  = info->cipher.aesctr.in;
+            out_buf = info->cipher.aesctr.out;
+            data_sz = info->cipher.aesctr.sz;
             break;
 #endif
         default:
@@ -754,13 +683,63 @@ static int crypto2dev_cipher(const wc_CryptoInfo* info)
     if (aes == NULL)
         return BAD_FUNC_ARG;
 
+#ifdef HAVE_AESGCM
+    if (info->cipher.type == WC_CIPHER_AES_GCM) {
+        /* AES-GCM requires a 96-bit (12-byte) nonce per NIST SP 800-38D.
+         * Reject non-standard nonce lengths rather than passing them to the
+         * kernel, which may accept silently (wrong auth) or return EINVAL. */
+        if (ivSz != GCM_NONCE_MID_SZ)
+            return CRYPTOCB_UNAVAILABLE;
+        {
+            /* FIPS 140-3 SP 800-38D Table 1: minimum GCM authentication tag
+             * is 96 bits (12 bytes).  Tags shorter than 12 bytes reduce the
+             * forgery-resistance bound below FIPS-approved levels; fall back
+             * to software so the FIPS policy decision stays at wolfCrypt.
+             * authTagSz == 0 is handled later (decrypt rejects it with
+             * BUFFER_E; encrypt silently skips GET_TAG as caller asked for
+             * no tag).
+             *
+             * Maximum tag check: also reject oversized tags here, before pool
+             * acquisition.  Without this early check, the encrypt path
+             * completes write/FINALIZE/read (ciphertext lands in out_buf)
+             * before hitting BUFFER_E, leaving unauthenticated ciphertext
+             * visible to a caller that does not check the return code.  The
+             * decrypt path checks this condition before SET_TAG (after pool
+             * acquire but before write); checking both directions early is
+             * symmetric and avoids pointless hardware work on invalid input. */
+            word32 chk_tagSz = is_enc ? info->cipher.aesgcm_enc.authTagSz
+                                      : info->cipher.aesgcm_dec.authTagSz;
+            if (chk_tagSz > 0 && chk_tagSz < 12)
+                return CRYPTOCB_UNAVAILABLE;
+            if (chk_tagSz > CRYPTO2DEV_TAG_MAXLEN)
+                return BUFFER_E;
+        }
+    }
+#endif
+
+#ifdef HAVE_AES_CBC
+    /* CBC input must be AES_BLOCK_SIZE-aligned.  Enforce before pool
+     * acquisition: a non-aligned data_sz causes word32 underflow in the
+     * IV update (src + data_sz - AES_BLOCK_SIZE), reading from an
+     * arbitrary memory address.  wc_AesCbcEncrypt only checks alignment
+     * when WOLFSSL_AES_CBC_LENGTH_CHECKS is defined, which is not the
+     * default. */
+    if (info->cipher.type == WC_CIPHER_AES_CBC &&
+            data_sz % AES_BLOCK_SIZE != 0)
+        return BAD_FUNC_ARG;
+#endif
+
     ctx = (const Crypto2DevAesCtx*)aes->devCtx;
     if (ctx == NULL || ctx->keySz == 0)
         return CRYPTOCB_UNAVAILABLE;
 
     op_fd = crypto2dev_pool_acquire(&g_pool, &pool_slot);
-    if (op_fd < 0)
+    if (op_fd < 0) {
+        if (g_pool.slots != NULL)
+            WOLFSSL_MSG("crypto2dev: cipher pool exhausted — increase "
+                        "WOLFSSL_CRYPTO2DEV_POOL_SIZE");
         return WC_HW_E;
+    }
 
     XMEMSET(&init_op, 0, sizeof(init_op));
     XSTRNCPY(init_op.algo, algo, sizeof(init_op.algo) - 1);
@@ -770,10 +749,23 @@ static int crypto2dev_cipher(const wc_CryptoInfo* info)
     init_op.key_fd = -1;
     if (ioctl(op_fd, CRYPTO2DEV_IOC_INIT, &init_op) < 0) {
         ret = crypto2dev_to_wc_err(errno);
+        /* EOPNOTSUPP/ENOSYS/ENOENT → NOT_COMPILED_IN: device lacks this algo
+         * (no provider registered, or provider not FIPS-validated).
+         * Promote to CRYPTOCB_UNAVAILABLE so wolfSSL falls back to software
+         * rather than aborting the operation with a hard error. */
+        if (ret == NOT_COMPILED_IN)
+            ret = CRYPTOCB_UNAVAILABLE;
         goto done;
     }
 
-    if (iv != NULL && ivSz > 0 && ivSz <= CRYPTO2DEV_IV_MAXLEN) {
+    if (iv != NULL && ivSz > 0) {
+        /* Reject oversized IV: silently skipping SET_IV would use whatever
+         * IV the device last saw (or a zero IV) — wrong ciphertext/plaintext
+         * with no error signal.  Return BUFFER_E, matching the AAD guard. */
+        if (ivSz > CRYPTO2DEV_IV_MAXLEN) {
+            ret = BUFFER_E;
+            goto done;
+        }
         XMEMSET(&iv_op, 0, sizeof(iv_op));
         XMEMCPY(iv_op.iv, iv, ivSz);
         iv_op.ivlen = ivSz;
@@ -793,8 +785,14 @@ static int crypto2dev_cipher(const wc_CryptoInfo* info)
         word32 authTagSz    = is_enc ? info->cipher.aesgcm_enc.authTagSz
                                       : info->cipher.aesgcm_dec.authTagSz;
 
-        if (authIn != NULL && authInSz > 0 &&
-                authInSz <= CRYPTO2DEV_AAD_MAXLEN) {
+        if (authIn != NULL && authInSz > 0) {
+            /* Reject oversized AAD: silently skipping SET_AAD would cause
+             * the device to authenticate with empty AAD instead of the
+             * provided one — an authentication bypass for the caller. */
+            if (authInSz > CRYPTO2DEV_AAD_MAXLEN) {
+                ret = BUFFER_E;
+                goto done;
+            }
             XMEMSET(&aad_op, 0, sizeof(aad_op));
             XMEMCPY(aad_op.aad, authIn, authInSz);
             aad_op.aadlen = authInSz;
@@ -804,8 +802,16 @@ static int crypto2dev_cipher(const wc_CryptoInfo* info)
             }
         }
 
-        if (!is_enc && authTag != NULL && authTagSz > 0 &&
-                authTagSz <= CRYPTO2DEV_TAG_MAXLEN) {
+        if (!is_enc) {
+            /* Reject missing or oversized auth tag: skipping SET_TAG on
+             * decrypt causes the device to authenticate against no tag —
+             * an authentication bypass for the caller.  Match the hard
+             * BUFFER_E pattern used for oversized AAD above. */
+            if (authTag == NULL || authTagSz == 0 ||
+                    authTagSz > CRYPTO2DEV_TAG_MAXLEN) {
+                ret = BUFFER_E;
+                goto done;
+            }
             XMEMSET(&tag_op, 0, sizeof(tag_op));
             XMEMCPY(tag_op.tag, authTag, authTagSz);
             tag_op.taglen = authTagSz;
@@ -817,108 +823,79 @@ static int crypto2dev_cipher(const wc_CryptoInfo* info)
     }
 #endif /* HAVE_AESGCM */
 
+    /* AES-GCM allows zero-length plaintext (tag-only). Other modes
+     * require non-NULL buffers and non-zero length. */
+#ifdef HAVE_AESGCM
+    if (info->cipher.type == WC_CIPHER_AES_GCM) {
+        if (data_sz != 0 && (in_buf == NULL || out_buf == NULL)) {
+            ret = BAD_FUNC_ARG;
+            goto done;
+        }
+    } else
+#endif
     {
-        const byte* in_buf = NULL;
-        byte* out_buf = NULL;
-        word32 data_sz = 0;
-
-        switch (info->cipher.type) {
-#ifdef HAVE_AES_CBC
-            case WC_CIPHER_AES_CBC:
-                in_buf  = info->cipher.aescbc.in;
-                out_buf = info->cipher.aescbc.out;
-                data_sz = info->cipher.aescbc.sz;
-                break;
-#endif
-#ifdef HAVE_AESGCM
-            case WC_CIPHER_AES_GCM:
-                in_buf  = is_enc ? info->cipher.aesgcm_enc.in
-                                 : info->cipher.aesgcm_dec.in;
-                out_buf = is_enc ? info->cipher.aesgcm_enc.out
-                                 : info->cipher.aesgcm_dec.out;
-                data_sz = is_enc ? info->cipher.aesgcm_enc.sz
-                                 : info->cipher.aesgcm_dec.sz;
-                break;
-#endif
-#ifdef WOLFSSL_AES_COUNTER
-            case WC_CIPHER_AES_CTR:
-                in_buf  = info->cipher.aesctr.in;
-                out_buf = info->cipher.aesctr.out;
-                data_sz = info->cipher.aesctr.sz;
-                break;
-#endif
-            default:
-                ret = WC_HW_E;
-                goto done;
+        if (in_buf == NULL || out_buf == NULL || data_sz == 0) {
+            ret = BAD_FUNC_ARG;
+            goto done;
         }
+    }
 
-        /* AES-GCM allows zero-length plaintext (tag-only). Other modes
-         * require non-NULL buffers and non-zero length. */
-#ifdef HAVE_AESGCM
-        if (info->cipher.type == WC_CIPHER_AES_GCM) {
-            if (data_sz != 0 && (in_buf == NULL || out_buf == NULL)) {
-                ret = BAD_FUNC_ARG;
-                goto done;
-            }
-        } else
-#endif
-        {
-            if (in_buf == NULL || out_buf == NULL || data_sz == 0) {
-                ret = BAD_FUNC_ARG;
-                goto done;
-            }
+    if (data_sz > 0) {
+        nw = write(op_fd, in_buf, data_sz);
+        if (nw != (ssize_t)data_sz) {
+            ret = (nw < 0) ? crypto2dev_to_wc_err(errno) : WC_HW_E;
+            goto done;
         }
+    }
 
-        if (data_sz > 0) {
-            nw = write(op_fd, in_buf, data_sz);
-            if (nw != (ssize_t)data_sz) {
-                ret = (nw < 0) ? crypto2dev_to_wc_err(errno) : WC_HW_E;
-                goto done;
-            }
-        }
+    if (ioctl(op_fd, CRYPTO2DEV_IOC_FINALIZE, NULL) < 0) {
+        ret = crypto2dev_to_wc_err(errno);
+        goto done;
+    }
 
-        if (ioctl(op_fd, CRYPTO2DEV_IOC_FINALIZE, NULL) < 0) {
-            ret = crypto2dev_to_wc_err(errno);
+    if (data_sz > 0) {
+        nr = read(op_fd, out_buf, data_sz);
+        if (nr != (ssize_t)data_sz) {
+            ret = (nr < 0) ? crypto2dev_to_wc_err(errno) : WC_HW_E;
             goto done;
         }
 
-        if (data_sz > 0) {
-            nr = read(op_fd, out_buf, data_sz);
-            if (nr != (ssize_t)data_sz) {
-                ret = (nr < 0) ? crypto2dev_to_wc_err(errno) : WC_HW_E;
-                goto done;
-            }
-
 #ifdef HAVE_AES_CBC
-            if (info->cipher.type == WC_CIPHER_AES_CBC) {
-                const byte* src = is_enc ? out_buf : in_buf;
-                XMEMCPY((byte*)((Aes*)aes)->reg,
-                        src + data_sz - AES_BLOCK_SIZE, AES_BLOCK_SIZE);
-            }
+        if (info->cipher.type == WC_CIPHER_AES_CBC) {
+            const byte* src = is_enc ? out_buf : in_buf;
+            XMEMCPY((byte*)aes->reg,
+                    src + data_sz - AES_BLOCK_SIZE, AES_BLOCK_SIZE);
+        }
 #endif
 #ifdef WOLFSSL_AES_COUNTER
-            if (info->cipher.type == WC_CIPHER_AES_CTR) {
-                word32 blocks = (data_sz + AES_BLOCK_SIZE - 1) / AES_BLOCK_SIZE;
-                byte* ctr = (byte*)((Aes*)aes)->reg;
-                word32 b;
-                for (b = 0; b < blocks; b++) {
-                    int ci;
-                    for (ci = AES_BLOCK_SIZE - 1; ci >= 0; ci--) {
-                        if (++ctr[ci])
-                            break;
-                    }
-                }
+        if (info->cipher.type == WC_CIPHER_AES_CTR) {
+            /* Advance aes->reg (big-endian 128-bit counter) by the number of
+             * 128-bit blocks just consumed.  Single-pass carry-ripple from the
+             * rightmost byte: add `blocks` as a word32 carry and propagate.
+             * Terminates after at most 4 bytes for blocks < 2^32; typically
+             * 1-2 bytes for TLS record sizes.  Matches wolfSSL's own
+             * IncrementAesCounter() semantics and the Linux kernel's crypto_inc()
+             * used by the hardware driver. */
+            word32 blocks = (data_sz + AES_BLOCK_SIZE - 1) / AES_BLOCK_SIZE;
+            byte* ctr = (byte*)aes->reg;
+            word32 carry = blocks;
+            int ci;
+            for (ci = AES_BLOCK_SIZE - 1; ci >= 0 && carry != 0; ci--) {
+                carry += (word32)ctr[ci];
+                ctr[ci] = (byte)(carry & 0xFF);
+                carry >>= 8;
             }
-#endif
         }
+#endif
     }
 
 #ifdef HAVE_AESGCM
     if (info->cipher.type == WC_CIPHER_AES_GCM && is_enc) {
         byte* authTag    = info->cipher.aesgcm_enc.authTag;
         word32 authTagSz = info->cipher.aesgcm_enc.authTagSz;
-        if (authTag != NULL && authTagSz > 0 &&
-                authTagSz <= CRYPTO2DEV_TAG_MAXLEN) {
+        /* authTagSz > CRYPTO2DEV_TAG_MAXLEN is already rejected by the early
+         * check before pool acquire (line ~707).  No second check needed here. */
+        if (authTag != NULL && authTagSz > 0) {
             XMEMSET(&tag_op, 0, sizeof(tag_op));
             tag_op.taglen = authTagSz;
             if (ioctl(op_fd, CRYPTO2DEV_IOC_GET_TAG, &tag_op) < 0) {
@@ -992,18 +969,26 @@ static int crypto2dev_hash(wc_CryptoInfo* info)
             break;
 #endif
         default:
+            /* Unsupported hash type: fall through to software. */
             return CRYPTOCB_UNAVAILABLE;
     }
+    /* devctx_ptr is always set by the non-default cases above. */
 
-    if (devctx_ptr == NULL)
-        return BAD_FUNC_ARG;
-
+    /* API contract: callers must call wc_Sha256Init() (or equivalent) before
+     * reusing a hash object after wc_Sha256Final().  Final frees the hardware
+     * context and sets devCtx = NULL; a subsequent Update without an Init
+     * silently restarts the hash.  This matches wolfSSL's own software-path
+     * behaviour and is not defended against here. */
     if (*devctx_ptr == NULL) {
         struct crypto2dev_init_op init_op;
         int pool_slot = -1;
         int op_fd = crypto2dev_pool_acquire(&g_pool, &pool_slot);
-        if (op_fd < 0)
+        if (op_fd < 0) {
+            if (g_pool.slots != NULL)
+                WOLFSSL_MSG("crypto2dev: hash pool exhausted — increase "
+                            "WOLFSSL_CRYPTO2DEV_POOL_SIZE");
             return WC_HW_E;
+        }
 
         XMEMSET(&init_op, 0, sizeof(init_op));
         XSTRNCPY(init_op.algo, algo, sizeof(init_op.algo) - 1);
@@ -1012,6 +997,11 @@ static int crypto2dev_hash(wc_CryptoInfo* info)
         init_op.key_fd = -1;
         if (ioctl(op_fd, CRYPTO2DEV_IOC_INIT, &init_op) < 0) {
             int err = crypto2dev_to_wc_err(errno);
+            /* EOPNOTSUPP/ENOSYS/ENOENT → NOT_COMPILED_IN: device lacks this hash
+             * (no provider registered, or provider not FIPS-validated).
+             * Promote to CRYPTOCB_UNAVAILABLE so wolfSSL falls back to software. */
+            if (err == NOT_COMPILED_IN)
+                err = CRYPTOCB_UNAVAILABLE;
             close(op_fd);
             crypto2dev_pool_release(&g_pool, pool_slot);
             ForceZero(&init_op, sizeof(init_op));
@@ -1027,8 +1017,6 @@ static int crypto2dev_hash(wc_CryptoInfo* info)
         }
         ctx->op_fd     = op_fd;
         ctx->pool_slot = pool_slot;
-        XSTRNCPY(ctx->algo, algo, sizeof(ctx->algo) - 1);
-        ctx->algo[sizeof(ctx->algo) - 1] = '\0';
         *devctx_ptr = ctx;
     } else {
         ctx = *devctx_ptr;
@@ -1085,6 +1073,14 @@ static int crypto2dev_hmac_setkey_ctx(const wc_CryptoInfo* info)
         return BAD_FUNC_ARG;
     if (keySz > (word32)sizeof(((Crypto2DevHmacCtx*)0)->key))
         return CRYPTOCB_UNAVAILABLE; /* oversized key: fall through to software */
+    /* FIPS SP 800-107 §5.3: HMAC key must be >= 14 bytes (112-bit security).
+     * Return CRYPTOCB_UNAVAILABLE so wolfSSL's own key-length validation runs.
+     * Must NOT return 0 here: wc_HmacSetKey returns immediately when the port
+     * returns 0, skipping the wolfSSL software key-size check entirely.
+     * Must NOT return WC_HW_E: that would hard-fail non-FIPS builds that
+     * legitimately use short keys.  CRYPTOCB_UNAVAILABLE lets wolfSSL decide. */
+    if (keySz < 14)
+        return CRYPTOCB_UNAVAILABLE;
 
     switch (hmac->macType) {
         case WC_SHA256: algo = "hmac(sha256)"; break;
@@ -1095,14 +1091,20 @@ static int crypto2dev_hmac_setkey_ctx(const wc_CryptoInfo* info)
 
     if (hmac->devCtx != NULL) {
         Crypto2DevHmacCtx* old_ctx = (Crypto2DevHmacCtx*)hmac->devCtx;
-        /* Free any pending accumulation buffer before zeroing the struct. */
-        if (old_ctx->data != NULL) {
-            XMEMSET(old_ctx->data, 0, old_ctx->dataSz);
-            XFREE(old_ctx->data, NULL, DYNAMIC_TYPE_TMP_BUFFER);
+        if (old_ctx->owner != (void*)hmac) {
+            /* Aliased from wc_HmacCopy — don't free; just release our reference. */
+            hmac->devCtx = NULL;
         }
-        ForceZero(hmac->devCtx, sizeof(Crypto2DevHmacCtx));
-        XFREE(hmac->devCtx, NULL, DYNAMIC_TYPE_TMP_BUFFER);
-        hmac->devCtx = NULL;
+        else {
+            /* Free any pending accumulation buffer before zeroing the struct. */
+            if (old_ctx->data != NULL) {
+                ForceZero(old_ctx->data, old_ctx->dataCap);
+                XFREE(old_ctx->data, NULL, DYNAMIC_TYPE_TMP_BUFFER);
+            }
+            ForceZero(hmac->devCtx, sizeof(Crypto2DevHmacCtx));
+            XFREE(hmac->devCtx, NULL, DYNAMIC_TYPE_TMP_BUFFER);
+            hmac->devCtx = NULL;
+        }
     }
 
     ctx = (Crypto2DevHmacCtx*)XMALLOC(sizeof(Crypto2DevHmacCtx),
@@ -1115,7 +1117,8 @@ static int crypto2dev_hmac_setkey_ctx(const wc_CryptoInfo* info)
     ctx->keySz = keySz;
     XSTRNCPY(ctx->algo, algo, sizeof(ctx->algo) - 1);
     ctx->algo[sizeof(ctx->algo) - 1] = '\0';
-    /* ctx->data = NULL; ctx->dataSz = 0; — already zeroed by XMEMSET above */
+    ctx->owner = hmac;
+    /* ctx->data = NULL; ctx->dataSz = 0; ctx->dataCap = 0 — already zeroed by XMEMSET above */
     hmac->devCtx = ctx;
     return 0;
 }
@@ -1145,32 +1148,65 @@ static int crypto2dev_hmac(const wc_CryptoInfo* info)
      * Accumulate data on Update; flush to hardware on Final.
      */
     if (info->hmac.digest == NULL) {
-        /* Update phase — append to accumulation buffer. */
-        byte* new_data;
+        /* Update phase — append to accumulation buffer with amortized growth.
+         * The entire HMAC input is buffered here and sent to hardware as one
+         * write() at Final time.  True streaming HMAC (stateful fd surviving
+         * across wc_HmacUpdate calls) requires a kernel driver enhancement
+         * not yet supported.
+         * Inputs larger than WOLFSSL_CRYPTO2DEV_HMAC_MAX_BUF (default 64 KB)
+         * return WC_HW_E — see the macro comment for why CRYPTOCB_UNAVAILABLE
+         * is not safe. */
+        word32 need;
         if (info->hmac.in == NULL)
             return (info->hmac.inSz == 0) ? 0 : BAD_FUNC_ARG;
 
         if (info->hmac.inSz > (word32)(0xFFFFFFFFu - ctx->dataSz))
             return BAD_FUNC_ARG;
-        new_data = (byte*)XMALLOC(ctx->dataSz + info->hmac.inSz,
-                                   NULL, DYNAMIC_TYPE_TMP_BUFFER);
-        if (new_data == NULL)
-            return MEMORY_E;
-        if (ctx->data != NULL) {
-            XMEMCPY(new_data, ctx->data, ctx->dataSz);
-            XMEMSET(ctx->data, 0, ctx->dataSz);
-            XFREE(ctx->data, NULL, DYNAMIC_TYPE_TMP_BUFFER);
+        need = ctx->dataSz + info->hmac.inSz;
+
+        if (need > WOLFSSL_CRYPTO2DEV_HMAC_MAX_BUF) {
+            WOLFSSL_MSG("crypto2dev: HMAC input exceeds "
+                        "WOLFSSL_CRYPTO2DEV_HMAC_MAX_BUF — hard failure; "
+                        "increase the limit or chunk via multiple HMAC ops");
+            return WC_HW_E;
         }
-        XMEMCPY(new_data + ctx->dataSz, info->hmac.in, info->hmac.inSz);
-        ctx->data   = new_data;
+
+        if (need > ctx->dataCap) {
+            word32 new_cap = (ctx->dataCap > 0) ? ctx->dataCap * 2 : 1024u;
+            byte* new_data;
+            /* Cap after doubling so allocation never exceeds the max even
+             * when dataCap was just under HMAC_MAX_BUF/2. */
+            if (new_cap > WOLFSSL_CRYPTO2DEV_HMAC_MAX_BUF)
+                new_cap = WOLFSSL_CRYPTO2DEV_HMAC_MAX_BUF;
+            if (new_cap < need)
+                new_cap = need;
+            new_data = (byte*)XMALLOC(new_cap, NULL, DYNAMIC_TYPE_TMP_BUFFER);
+            if (new_data == NULL)
+                return MEMORY_E;
+            if (ctx->data != NULL) {
+                XMEMCPY(new_data, ctx->data, ctx->dataSz);
+                ForceZero(ctx->data, ctx->dataCap);
+                XFREE(ctx->data, NULL, DYNAMIC_TYPE_TMP_BUFFER);
+            }
+            ctx->data    = new_data;
+            ctx->dataCap = new_cap;
+        }
+        XMEMCPY(ctx->data + ctx->dataSz, info->hmac.in, info->hmac.inSz);
         ctx->dataSz += info->hmac.inSz;
         return 0;
     }
 
     /* Final phase — flush accumulated data to hardware and read MAC. */
     op_fd = crypto2dev_pool_acquire(&g_pool, &pool_slot);
-    if (op_fd < 0)
-        return WC_HW_E;
+    if (op_fd < 0) {
+        /* Pool exhausted (or destroyed) at Final time.  Free the ctx so
+         * wc_HmacFree does not re-enter this path with a stale devCtx. */
+        if (g_pool.slots != NULL)
+            WOLFSSL_MSG("crypto2dev: HMAC pool exhausted — increase "
+                        "WOLFSSL_CRYPTO2DEV_POOL_SIZE");
+        ret = WC_HW_E;
+        goto done;
+    }
 
     XMEMSET(&init_op, 0, sizeof(init_op));
     XMEMCPY(init_op.algo, ctx->algo, sizeof(init_op.algo)); /* already zeroed */
@@ -1180,6 +1216,14 @@ static int crypto2dev_hmac(const wc_CryptoInfo* info)
     init_op.key_fd = -1;
     if (ioctl(op_fd, CRYPTO2DEV_IOC_INIT, &init_op) < 0) {
         ret = crypto2dev_to_wc_err(errno);
+        /* EOPNOTSUPP/ENOSYS/ENOENT → NOT_COMPILED_IN: device lacks this HMAC algo
+         * (no provider registered, or provider not FIPS-validated).
+         * Do NOT return CRYPTOCB_UNAVAILABLE: Update calls already returned 0
+         * (claimed), so wolfSSL's software HMAC state has no accumulated data.
+         * A software Final fallback would compute HMAC over empty input.
+         * Return WC_HW_E to surface a hard failure with no silent fallback. */
+        if (ret == NOT_COMPILED_IN)
+            ret = WC_HW_E;
         goto done;
     }
 
@@ -1218,13 +1262,28 @@ done:
         close(op_fd);
         crypto2dev_pool_release(&g_pool, pool_slot);
     }
-    /* Zero and free the accumulation buffer regardless of success/failure. */
+    /* Zero and free the accumulation buffer.  ForceZero prevents
+     * dead-store elimination (XMEMSET on a block about to be XFREE'd
+     * can be elided by the optimizer, leaving HMAC input data readable
+     * in the heap after free). */
     if (ctx->data != NULL) {
-        XMEMSET(ctx->data, 0, ctx->dataSz);
+        ForceZero(ctx->data, ctx->dataCap);
         XFREE(ctx->data, NULL, DYNAMIC_TYPE_TMP_BUFFER);
-        ctx->data   = NULL;
-        ctx->dataSz = 0;
     }
+    /* Free the HmacCtx struct and clear the pointer.
+     *
+     * wolfSSL's wc_HmacFree() does NOT dispatch WC_ALGO_TYPE_FREE for
+     * HMAC objects.  Instead it calls this callback with digest != NULL
+     * as its cleanup signal (see wc_HmacFree in wolfcrypt/src/hmac.c).
+     * Freeing here covers both the normal wc_HmacFinal path and the
+     * "abandoned before Final" case that wc_HmacFree triggers.
+     *
+     * Setting devCtx = NULL also prevents wc_HmacFree from issuing a
+     * second spurious Final call (it checks devCtx != NULL before
+     * calling the callback). */
+    ForceZero(ctx, sizeof(Crypto2DevHmacCtx));
+    XFREE(ctx, NULL, DYNAMIC_TYPE_TMP_BUFFER);
+    hmac->devCtx = NULL;
     ForceZero(&init_op, sizeof(init_op));
     return ret;
 }
@@ -1305,12 +1364,28 @@ static int crypto2dev_free_hmac(const wc_CryptoInfo* info)
     if (hmac == NULL || hmac->devCtx == NULL)
         return 0;
     ctx = (Crypto2DevHmacCtx*)hmac->devCtx;
+    /* Detect aliased devCtx from wc_HmacCopy.  wolfSSL does not dispatch COPY
+     * through CryptoCb for HMAC (only for hash objects), so two Hmac structs
+     * created by wc_HmacCopy share the same ctx pointer.  Freeing here would
+     * double-free the owner's allocation; instead, release our reference.
+     *
+     * If the owner's FREE fires first, ForceZero already zeroed ctx->owner to
+     * NULL before XFREE; reading ctx->owner here is technically UB, but in
+     * practice the allocator has not yet recycled the block and the NULL is
+     * still readable.  The mismatch (NULL != hmac) is detected and we bail. */
+    if (ctx->owner != (void*)hmac) {
+        WOLFSSL_MSG("crypto2dev: HMAC devCtx aliased by wc_HmacCopy — "
+                    "skipping free (see wolfssl-qsi.2)");
+        hmac->devCtx = NULL;
+        return 0;
+    }
     /* Free any pending accumulation buffer (abandoned before Final). */
     if (ctx->data != NULL) {
-        XMEMSET(ctx->data, 0, ctx->dataSz);
+        ForceZero(ctx->data, ctx->dataCap);
         XFREE(ctx->data, NULL, DYNAMIC_TYPE_TMP_BUFFER);
-        ctx->data   = NULL;
-        ctx->dataSz = 0;
+        ctx->data    = NULL;
+        ctx->dataSz  = 0;
+        ctx->dataCap = 0;
     }
     ForceZero(hmac->devCtx, sizeof(Crypto2DevHmacCtx));
     XFREE(hmac->devCtx, NULL, DYNAMIC_TYPE_TMP_BUFFER);
@@ -1320,9 +1395,21 @@ static int crypto2dev_free_hmac(const wc_CryptoInfo* info)
 #endif /* NO_HMAC */
 #endif /* WOLF_CRYPTO_CB_FREE */
 
-/* Infer the hash algorithm name from digest length, for DigestInfo construction
- * in RSA PKCS#1 v1.5 sign/verify and for ECDSA sign/verify. */
-static const char* crypto2dev_hash_algo_name(word32 digest_len)
+/* Map ECDSA digest length to hash algorithm name for DO_SIGN/DO_VERIFY.
+ *
+ * THIS FUNCTION IS ECDSA-ONLY.  It works because the three NIST curves
+ * used with ECDSA (P-256/P-384/P-521) pair with exactly one hash each:
+ *   32 bytes → SHA-256 (P-256)
+ *   48 bytes → SHA-384 (P-384)
+ *   64 bytes → SHA-512 (P-521)
+ * and those three sizes are distinct.
+ *
+ * Do NOT add SHA-3 cases here: SHA3-256 produces 32 bytes — same as
+ * SHA-256 — so the dispatch would silently use the wrong algorithm.
+ * If ECDSA with SHA-3 digests is ever needed, pass the algorithm name
+ * through the SETKEY path (e.g., store it in key->devCtx) rather than
+ * inferring it from digest length. */
+static const char* crypto2dev_ecdsa_hash_algo_name(word32 digest_len)
 {
     switch (digest_len) {
         case WC_SHA256_DIGEST_SIZE: return "sha256";
@@ -1339,7 +1426,7 @@ static int crypto2dev_rsa(const wc_CryptoInfo* info)
      * RSA via crypto2dev is not currently supported. wc_CryptoCb_Rsa() passes
      * the post-padding DigestInfo block rather than the raw digest; the
      * DO_SIGN/DO_VERIFY ioctl expects a raw digest. Correct implementation
-     * requires WOLF_CRYPTO_CB_RSA_PAD support (tracked: wolfssl-tm1).
+     * requires WOLF_CRYPTO_CB_RSA_PAD support (not yet in wolfSSL CryptoCb API).
      * Fall back to software.
      */
     return CRYPTOCB_UNAVAILABLE;
@@ -1364,14 +1451,22 @@ static int crypto2dev_ecdsa(const wc_CryptoInfo* info)
         XMEMSET(&sign_op, 0, sizeof(sign_op));
         sign_op.key_fd = key_fd;
         {
+            /* Digest length → hash algo name (P-256=32→sha256, P-384=48→sha384,
+             * P-521=64→sha512).  SHA-3 excluded: SHA3-256 also produces 32
+             * bytes, colliding with SHA-256.  See crypto2dev_ecdsa_hash_algo_name()
+             * comment for full rationale before adding cases here. */
             const char* hash_algo =
-                crypto2dev_hash_algo_name(info->pk.eccsign.inlen);
+                crypto2dev_ecdsa_hash_algo_name(info->pk.eccsign.inlen);
             if (hash_algo == NULL) {
                 ret = BAD_FUNC_ARG;
                 goto ecdsa_sign_done;
             }
             XSTRNCPY(sign_op.hash_algo, hash_algo,
                      sizeof(sign_op.hash_algo) - 1);
+        }
+        if (info->pk.eccsign.in == NULL) {
+            ret = BAD_FUNC_ARG;
+            goto ecdsa_sign_done;
         }
         sign_op.digest_len = info->pk.eccsign.inlen;
         if (sign_op.digest_len > CRYPTO2DEV_HASH_MAXLEN) {
@@ -1380,19 +1475,29 @@ static int crypto2dev_ecdsa(const wc_CryptoInfo* info)
         }
         XMEMCPY(sign_op.digest, info->pk.eccsign.in, sign_op.digest_len);
 
-        wc_LockMutex(&g_ecdsa_fd_lock);
-        if (g_crypto2dev_fd < 0) {
-            wc_UnLockMutex(&g_ecdsa_fd_lock);
-            ret = WC_HW_E;
-            goto ecdsa_sign_done;
+        {
+            int op_fd;
+            int pool_slot = -1;
+            op_fd = crypto2dev_pool_acquire(&g_pool, &pool_slot);
+            if (op_fd < 0) {
+                if (g_pool.slots != NULL)
+                    WOLFSSL_MSG("crypto2dev: ECDSA sign pool exhausted — increase "
+                                "WOLFSSL_CRYPTO2DEV_POOL_SIZE");
+                ret = WC_HW_E;
+                goto ecdsa_sign_done;
+            }
+            if (ioctl(op_fd, CRYPTO2DEV_IOC_DO_SIGN, &sign_op) < 0)
+                ret = crypto2dev_to_wc_err(errno);
+            close(op_fd);
+            crypto2dev_pool_release(&g_pool, pool_slot);
         }
-        if (ioctl(g_crypto2dev_fd, CRYPTO2DEV_IOC_DO_SIGN, &sign_op) < 0) {
-            ret = crypto2dev_to_wc_err(errno);
-            wc_UnLockMutex(&g_ecdsa_fd_lock);
+        if (ret != 0)
             goto ecdsa_sign_done;
-        }
-        wc_UnLockMutex(&g_ecdsa_fd_lock);
 
+        if (sign_op.sig_len > CRYPTO2DEV_SIG_MAXLEN) {
+            ret = BUFFER_E;
+            goto ecdsa_sign_done;
+        }
         if (sign_op.sig_len > *info->pk.eccsign.outlen) {
             ret = BUFFER_E;
             goto ecdsa_sign_done;
@@ -1410,7 +1515,9 @@ ecdsa_sign_done:
         struct crypto2dev_verify_op verify_op;
         int key_fd;
 
-        if (key == NULL)
+        /* Validate all output pointers before acquiring a pool slot. */
+        if (key == NULL || info->pk.eccverify.res == NULL ||
+                info->pk.eccverify.hash == NULL || info->pk.eccverify.sig == NULL)
             return BAD_FUNC_ARG;
         if (key->devCtx == NULL)
             return CRYPTOCB_UNAVAILABLE;
@@ -1420,8 +1527,9 @@ ecdsa_sign_done:
         XMEMSET(&verify_op, 0, sizeof(verify_op));
         verify_op.key_fd = key_fd;
         {
+            /* Same SHA-3 exclusion as sign path above. */
             const char* hash_algo =
-                crypto2dev_hash_algo_name(info->pk.eccverify.hashlen);
+                crypto2dev_ecdsa_hash_algo_name(info->pk.eccverify.hashlen);
             if (hash_algo == NULL)
                 return BAD_FUNC_ARG;
             XSTRNCPY(verify_op.hash_algo, hash_algo,
@@ -1440,24 +1548,25 @@ ecdsa_sign_done:
         }
         XMEMCPY(verify_op.sig, info->pk.eccverify.sig, verify_op.sig_len);
 
-        wc_LockMutex(&g_ecdsa_fd_lock);
-        if (g_crypto2dev_fd < 0) {
-            wc_UnLockMutex(&g_ecdsa_fd_lock);
-            ret = WC_HW_E;
-            goto ecdsa_verify_done;
+        {
+            int op_fd;
+            int pool_slot = -1;
+            op_fd = crypto2dev_pool_acquire(&g_pool, &pool_slot);
+            if (op_fd < 0) {
+                if (g_pool.slots != NULL)
+                    WOLFSSL_MSG("crypto2dev: ECDSA verify pool exhausted — increase "
+                                "WOLFSSL_CRYPTO2DEV_POOL_SIZE");
+                ret = WC_HW_E;
+                goto ecdsa_verify_done;
+            }
+            if (ioctl(op_fd, CRYPTO2DEV_IOC_DO_VERIFY, &verify_op) < 0)
+                ret = (errno == EBADMSG) ? SIG_VERIFY_E
+                                         : crypto2dev_to_wc_err(errno);
+            close(op_fd);
+            crypto2dev_pool_release(&g_pool, pool_slot);
         }
-        if (ioctl(g_crypto2dev_fd, CRYPTO2DEV_IOC_DO_VERIFY, &verify_op) < 0) {
-            ret = (errno == EBADMSG) ? SIG_VERIFY_E
-                                     : crypto2dev_to_wc_err(errno);
-            wc_UnLockMutex(&g_ecdsa_fd_lock);
-            goto ecdsa_verify_done;
-        }
-        wc_UnLockMutex(&g_ecdsa_fd_lock);
-        if (info->pk.eccverify.res == NULL) {
-            ret = BAD_FUNC_ARG;
-            goto ecdsa_verify_done;
-        }
-        *info->pk.eccverify.res = 1;
+        if (ret == 0)
+            *info->pk.eccverify.res = 1;
 
 ecdsa_verify_done:
         XMEMSET(&verify_op, 0, sizeof(verify_op));
@@ -1486,39 +1595,54 @@ static int crypto2dev_pk(const wc_CryptoInfo* info)
     }
 }
 
-/* wolfssl-1rl: HKDF and PBKDF2 via DO_KDF.
+/* NOTE: HKDF and PBKDF2 hardware offload via DO_KDF is not yet possible.
  *
- * wolfSSL's standard CryptoCb framework does not have a WC_ALGO_TYPE_KDF
- * dispatch entry. HKDF and PBKDF2 calls in wolfSSL go through the software
- * path directly and are not routed through the CryptoCb callback.
- * crypto2dev's DO_KDF ioctl is available (CRYPTO2DEV_IOC_DO_KDF) but cannot
- * be invoked via the standard CryptoCb API without wolfSSL changes.
- * See wolfssl-1rl for resolution options. */
+ * wolfSSL's CryptoCb framework has no WC_ALGO_TYPE_KDF dispatch entry; HKDF
+ * and PBKDF2 calls go directly through the software path without passing
+ * through the CryptoCb callback.  crypto2dev's DO_KDF ioctl is available
+ * (CRYPTO2DEV_IOC_DO_KDF) but cannot be invoked via the standard CryptoCb
+ * API without adding WC_ALGO_TYPE_KDF dispatch to wolfSSL upstream. */
 
-int wc_crypto2dev_init(void)
+int wc_crypto2dev_init(int pool_size)
 {
     int ret;
+    int cap;
 
-    if (g_crypto2dev_fd >= 0)
-        return 0; /* already open */
-    g_crypto2dev_fd = open(CRYPTO2DEV_PATH, O_RDWR | O_CLOEXEC);
-    if (g_crypto2dev_fd < 0) {
-        WOLFSSL_MSG("crypto2dev: failed to open " CRYPTO2DEV_PATH);
-        return WC_HW_E;
-    }
+    /* NOT thread-safe: must be called from a single thread before spawning
+     * any threads that will use the crypto2dev port.  The g_pool_inited
+     * check below is not atomic; two threads racing here both pass the check
+     * and both call crypto2dev_pool_init() — double-init of the pool mutex
+     * is undefined behavior on pthreads.  This mirrors wolfSSL's own
+     * wolfSSL_Init() contract: single-threaded init, then concurrent use. */
+    if (g_pool_inited)
+        return 0; /* already initialised */
+
+    cap = (pool_size > 0) ? pool_size : WOLFSSL_CRYPTO2DEV_POOL_SIZE;
 
 #ifdef WOLFSSL_CRYPTO2DEV_REQUIRE_FIPS
     {
+        /* Verify that a FIPS provider is currently loaded by issuing
+         * REQUIRE_FIPS on a probe fd.  If it fails (no FIPS provider
+         * registered), reject init entirely.
+         *
+         * Why a probe fd is sufficient:
+         *   The kernel registry maintains a global fips_provider_count.
+         *   While that count is > 0, crypto2dev_lookup_algo() silently
+         *   skips all non-FIPS providers for EVERY fd, process-wide.
+         *   Additionally, fips_gate() is called at the top of every write()
+         *   and read() handler on initialized fds: if the FIPS provider
+         *   unloads or fails its self-test AFTER init, the next write() or
+         *   read() on any pool fd returns -EACCES immediately.
+         *
+         *   Setting REQUIRE_FIPS on individual pool fds would be redundant:
+         *   the global registry filter already ensures the same guarantee.
+         *   The probe simply checks that we are in FIPS mode at startup;
+         *   the kernel enforces it for all subsequent operations on all fds. */
         int fips_probe_fd = open(CRYPTO2DEV_PATH, O_RDWR | O_CLOEXEC);
-        if (fips_probe_fd < 0) {
-            close(g_crypto2dev_fd);
-            g_crypto2dev_fd = -1;
+        if (fips_probe_fd < 0)
             return WC_HW_E;
-        }
         if (ioctl(fips_probe_fd, CRYPTO2DEV_IOC_REQUIRE_FIPS, NULL) < 0) {
             close(fips_probe_fd);
-            close(g_crypto2dev_fd);
-            g_crypto2dev_fd = -1;
             WOLFSSL_MSG("crypto2dev: FIPS provider not available");
             return FIPS_NOT_ALLOWED_E;
         }
@@ -1526,63 +1650,43 @@ int wc_crypto2dev_init(void)
     }
 #endif /* WOLFSSL_CRYPTO2DEV_REQUIRE_FIPS */
 
-    if (!g_ecdsa_fd_lock_inited) {
-        if (wc_InitMutex(&g_ecdsa_fd_lock) != 0) {
-            close(g_crypto2dev_fd);
-            g_crypto2dev_fd = -1;
-            return BAD_MUTEX_E;
-        }
-        g_ecdsa_fd_lock_inited = 1;
-    }
-
-    if (!g_pool_inited) {
-        ret = crypto2dev_pool_init(&g_pool, WOLFSSL_CRYPTO2DEV_POOL_SIZE);
-        if (ret != 0) {
-            close(g_crypto2dev_fd);
-            g_crypto2dev_fd = -1;
-            return ret;
-        }
-        g_pool_inited = 1;
-    }
+    ret = crypto2dev_pool_init(&g_pool, cap);
+    if (ret != 0)
+        return ret;
+    g_pool_inited = 1;
 
     return 0;
 }
 
 int wc_crypto2dev_cleanup(void)
 {
-    wc_CryptoCb_UnRegisterDevice(WOLF_CRYPTO2DEV_DEVID);
+    int i;
+    for (i = 0; i < g_devid_count; i++) {
+        wc_CryptoCb_UnRegisterDevice(g_devid_table[i].devId);
+        XFREE(g_devid_table[i].cfg, NULL, DYNAMIC_TYPE_TMP_BUFFER);
+        g_devid_table[i].devId = 0;
+        g_devid_table[i].cfg   = NULL;
+    }
+    g_devid_count = 0;
     if (g_pool_inited) {
         crypto2dev_pool_cleanup(&g_pool);
         g_pool_inited = 0;
     }
-    if (g_ecdsa_fd_lock_inited) {
-        wc_LockMutex(&g_ecdsa_fd_lock);
-        if (g_crypto2dev_fd >= 0) {
-            close(g_crypto2dev_fd);
-            g_crypto2dev_fd = -1;
-        }
-        wc_UnLockMutex(&g_ecdsa_fd_lock);
-        wc_FreeMutex(&g_ecdsa_fd_lock);
-        g_ecdsa_fd_lock_inited = 0;
-    }
-    /* Reset TLS-safe mode so a reinitialised port starts with hardware hash
-     * enabled rather than inheriting the previous session's setting. */
-    g_tls_safe_mode = 0;
     return 0;
 }
 
 int wc_crypto2dev_cb(int devId, wc_CryptoInfo* info, void* ctx)
 {
+    Crypto2DevConfig* cfg = (Crypto2DevConfig*)ctx;
     if (info == NULL)
         return BAD_FUNC_ARG;
     (void)devId;
-    (void)ctx;
 
     switch (info->algo_type) {
         case WC_ALGO_TYPE_CIPHER:
             return crypto2dev_cipher(info);
         case WC_ALGO_TYPE_HASH:
-            if (g_tls_safe_mode)
+            if (cfg != NULL && cfg->tls_safe)
                 return CRYPTOCB_UNAVAILABLE;
             return crypto2dev_hash(info);
 #ifndef NO_HMAC
@@ -1597,6 +1701,9 @@ int wc_crypto2dev_cb(int devId, wc_CryptoInfo* info, void* ctx)
 #endif
 #ifdef WOLF_CRYPTO_CB_FREE
         case WC_ALGO_TYPE_FREE:
+            /* info->free.algo identifies the object type being freed
+             * (WC_ALGO_TYPE_CIPHER, WC_ALGO_TYPE_HASH, etc.) so we can
+             * dispatch to the right free helper. */
             switch (info->free.algo) {
                 case WC_ALGO_TYPE_CIPHER:
                     return crypto2dev_free_cipher(info);
@@ -1614,21 +1721,116 @@ int wc_crypto2dev_cb(int devId, wc_CryptoInfo* info, void* ctx)
 #endif
 #ifdef WOLF_CRYPTO_CB_COPY
         case WC_ALGO_TYPE_COPY:
-            /* crypto2dev has no session-snapshot ioctl. Returning
-             * CRYPTOCB_UNAVAILABLE causes wolfSSL to fall back to a software
-             * copy of the hash state.
+            /* crypto2dev has no session-snapshot ioctl.
+             *
+             * When a hash object has active hardware state (devCtx != NULL,
+             * meaning an op_fd is open and data has been written to it),
+             * a software fallback copy (XMEMCPY of the struct) would alias
+             * the devCtx pointer in both src and dst.  Whichever object is
+             * Finalized or Freed first closes the op_fd and frees the ctx;
+             * the other then holds a dangling pointer — use-after-free and
+             * double-close of the fd (which the OS may have reused).
+             * Return WC_HW_E to surface a hard error rather than silently
+             * creating a corrupt copy.
+             *
+             * When devCtx == NULL (no active hardware state — object was
+             * Init'd but not yet Update'd, or already Final'd), XMEMCPY is
+             * safe: the NULL pointer is copied, so neither copy owns any
+             * hardware resource.  Return CRYPTOCB_UNAVAILABLE to allow it.
              *
              * Implication for TLS: wc_Sha256Copy is called for the Transcript-
-             * Hash during TLS 1.3 key derivation. Because the software state
-             * is empty (all data was written to the hardware fd), the software
-             * copy will produce wrong results.  To avoid this, TLS transcript
-             * hash objects (wc_Sha256, wc_Sha384) MUST use INVALID_DEVID.
-             * Only one-shot hash and HMAC-SHA256 for Finished can use hardware.
-             * See the TLS integration helper (wolfssl-2ed) for devId assignment.
-             *
-             * Option A (transcript replay buffer) is available via
-             * WOLFSSL_CRYPTO2DEV_HASH_REPLAY_COPY at a cost of O(transcript)
-             * memory per hash object. */
+             * Hash during TLS 1.3 key derivation. TLS-safe mode
+             * (wc_crypto2dev_assign_devid_ex) prevents hardware hash for objects
+             * whose devId has tls_safe == 1, so this path is never reached in
+             * normal TLS use.  See wc_crypto2dev_assign_devid_ex() header comment. */
+            /* Guard cipher COPY: if the source Aes has active hardware state
+             * (devCtx != NULL, meaning SETKEY stored a key-fd handle), a plain
+             * XMEMCPY aliases devCtx in both src and dst.  Whichever object is
+             * freed first runs ForceZero+XFREE on the block; the other then holds
+             * a dangling pointer — use-after-free and double-free (wolfssl-yjw.5).
+             * Return WC_HW_E to surface a hard error rather than corrupt state.
+             * When devCtx == NULL the copy is safe; fall through to CRYPTOCB_UNAVAILABLE. */
+            if (info->copy.algo == WC_ALGO_TYPE_CIPHER) {
+                const Aes* src = (const Aes*)info->copy.src;
+                if (src != NULL && src->devCtx != NULL)
+                    return WC_HW_E;
+            }
+#ifndef NO_HMAC
+            /* Guard HMAC COPY: wolfSSL's wc_HmacCopy does not dispatch through
+             * CryptoCb (unlike wc_Sha256Copy), so this case is not currently
+             * reached from the standard wolfSSL API.  It is here as primary
+             * defense so that if upstream ever adds CryptoCb COPY dispatch for
+             * HMAC, the port immediately returns WC_HW_E rather than silently
+             * aliasing the streaming accumulation buffer.
+             * The FREE-path owner guard (wolfssl-qsi.2) is secondary defense
+             * for the case where the copy slips through (COPY returns
+             * CRYPTOCB_UNAVAILABLE and wolfSSL does the XMEMCPY itself). */
+            if (info->copy.algo == WC_ALGO_TYPE_HMAC) {
+                const Hmac* src = (const Hmac*)info->copy.src;
+                if (src != NULL && src->devCtx != NULL)
+                    return WC_HW_E;
+            }
+#endif /* NO_HMAC */
+            if (info->copy.algo == WC_ALGO_TYPE_HASH) {
+                void* src_devctx = NULL;
+                switch (info->copy.type) {
+#ifndef NO_SHA256
+                    case WC_HASH_TYPE_SHA256: {
+                        const wc_Sha256* s = (const wc_Sha256*)info->copy.src;
+                        if (s != NULL) src_devctx = s->devCtx;
+                        break;
+                    }
+#endif
+#ifdef WOLFSSL_SHA384
+                    case WC_HASH_TYPE_SHA384: {
+                        const wc_Sha384* s = (const wc_Sha384*)info->copy.src;
+                        if (s != NULL) src_devctx = s->devCtx;
+                        break;
+                    }
+#endif
+#ifdef WOLFSSL_SHA512
+                    case WC_HASH_TYPE_SHA512: {
+                        const wc_Sha512* s = (const wc_Sha512*)info->copy.src;
+                        if (s != NULL) src_devctx = s->devCtx;
+                        break;
+                    }
+#endif
+#ifdef WOLFSSL_SHA3
+                    case WC_HASH_TYPE_SHA3_256:
+                    case WC_HASH_TYPE_SHA3_384:
+                    case WC_HASH_TYPE_SHA3_512: {
+                        const wc_Sha3* s = (const wc_Sha3*)info->copy.src;
+                        if (s != NULL) src_devctx = s->devCtx;
+                        break;
+                    }
+#endif
+                    default:
+                        break;
+                }
+                if (src_devctx != NULL)
+                    return WC_HW_E;
+            }
+#if defined(HAVE_ECC) && defined(WOLF_CRYPTO_CB_SETKEY)
+            /* Guard ECC key COPY: wolfSSL does not currently dispatch
+             * wc_CryptoCb_Copy for PK objects — only hash copy functions
+             * (sha256.c / sha512.c / sha3.c / sha.c) call wc_CryptoCb_Copy.
+             * This guard is defensive: if wolfSSL ever adds CryptoCb COPY
+             * dispatch for wc_ecc_copy_key, an ecc_key with devCtx set
+             * (hardware key fd) would alias the fd between src and dst.
+             * Whichever object is freed first closes the fd; the other then
+             * holds an invalid fd and calls ioctl() at sign/verify time.
+             * Return WC_HW_E when devCtx is set; fall through when NULL. */
+            if (info->copy.algo == WC_ALGO_TYPE_PK) {
+                if (info->copy.type == WC_PK_TYPE_ECDSA_SIGN  ||
+                    info->copy.type == WC_PK_TYPE_ECDSA_VERIFY ||
+                    info->copy.type == WC_PK_TYPE_ECDH         ||
+                    info->copy.type == WC_PK_TYPE_EC_KEYGEN) {
+                    const ecc_key* src_ecc = (const ecc_key*)info->copy.src;
+                    if (src_ecc != NULL && src_ecc->devCtx != NULL)
+                        return WC_HW_E;
+                }
+            }
+#endif /* HAVE_ECC && WOLF_CRYPTO_CB_SETKEY */
             return CRYPTOCB_UNAVAILABLE;
 #endif
         default:
@@ -1636,58 +1838,138 @@ int wc_crypto2dev_cb(int devId, wc_CryptoInfo* info, void* ctx)
     }
 }
 
-int wc_crypto2dev_assign_devid(WOLFSSL_CTX* ctx)
+/* Register wc_crypto2dev_cb under a caller-supplied devId without enabling
+ * TLS-safe mode.  Hardware hash (WC_ALGO_TYPE_HASH) remains active.
+ * wc_crypto2dev_cleanup() unregisters all devIds registered here.
+ * Idempotent: a second call with the same devId returns 0.
+ * Returns BUFFER_E if WOLFSSL_CRYPTO2DEV_MAX_DEVIDS slots are occupied. */
+int wc_crypto2dev_register_ex(int devId)
 {
     int ret;
+    Crypto2DevConfig* cfg;
+    if (crypto2dev_find_devid(devId) >= 0)
+        return 0;
+    if (g_devid_count >= WOLFSSL_CRYPTO2DEV_MAX_DEVIDS)
+        return BUFFER_E;
+    cfg = (Crypto2DevConfig*)XMALLOC(sizeof(Crypto2DevConfig), NULL,
+                                     DYNAMIC_TYPE_TMP_BUFFER);
+    if (cfg == NULL)
+        return MEMORY_E;
+    cfg->tls_safe = 0;
+    ret = wc_CryptoCb_RegisterDevice(devId, wc_crypto2dev_cb, cfg);
+    if (ret == 0) {
+        g_devid_table[g_devid_count].devId = devId;
+        g_devid_table[g_devid_count].cfg   = cfg;
+        g_devid_count++;
+    }
+    else {
+        XFREE(cfg, NULL, DYNAMIC_TYPE_TMP_BUFFER);
+    }
+    return ret;
+}
 
-    if (ctx == NULL)
-        return BAD_FUNC_ARG;
+/* Register wc_crypto2dev_cb under WOLF_CRYPTO2DEV_DEVID without TLS-safe mode.
+ * For TLS, use wc_crypto2dev_assign_devid() instead. */
+int wc_crypto2dev_register(void)
+{
+    return wc_crypto2dev_register_ex(WOLF_CRYPTO2DEV_DEVID);
+}
 
-    {
-        int prev_safe_mode = g_tls_safe_mode;
-        g_tls_safe_mode = 1;
-        ret = wc_CryptoCb_RegisterDevice(WOLF_CRYPTO2DEV_DEVID,
-                                         wc_crypto2dev_cb, NULL);
+/* set_fn assigns devId to the CTX/SSL object; returns WOLFSSL_SUCCESS. */
+typedef int (*crypto2dev_setid_fn)(void* obj, int devId);
+
+static int crypto2dev_assign_devid_impl(int devId, crypto2dev_setid_fn set_fn,
+                                        void* obj)
+{
+    int ret;
+    int idx;
+    int was_registered;
+    int prev_tls_safe;
+    Crypto2DevConfig* cfg;
+
+    idx            = crypto2dev_find_devid(devId);
+    was_registered = (idx >= 0);
+
+    if (!was_registered) {
+        if (g_devid_count >= WOLFSSL_CRYPTO2DEV_MAX_DEVIDS)
+            return BUFFER_E;
+        cfg = (Crypto2DevConfig*)XMALLOC(sizeof(Crypto2DevConfig), NULL,
+                                         DYNAMIC_TYPE_TMP_BUFFER);
+        if (cfg == NULL)
+            return MEMORY_E;
+        cfg->tls_safe = 0;
+        ret = wc_CryptoCb_RegisterDevice(devId, wc_crypto2dev_cb, cfg);
         if (ret != 0) {
-            g_tls_safe_mode = prev_safe_mode;
+            XFREE(cfg, NULL, DYNAMIC_TYPE_TMP_BUFFER);
             return ret;
         }
+        idx = g_devid_count;
+        g_devid_table[idx].devId = devId;
+        g_devid_table[idx].cfg   = cfg;
+        g_devid_count++;
+    }
 
-        ret = wolfSSL_CTX_SetDevId(ctx, WOLF_CRYPTO2DEV_DEVID);
-        if (ret != WOLFSSL_SUCCESS) {
-            wc_CryptoCb_UnRegisterDevice(WOLF_CRYPTO2DEV_DEVID);
-            g_tls_safe_mode = prev_safe_mode;
-            return ret;
+    cfg           = g_devid_table[idx].cfg;
+    prev_tls_safe = cfg->tls_safe;
+    if (!prev_tls_safe) {
+        cfg->tls_safe = 1;
+        WOLFSSL_MSG("crypto2dev: TLS-safe mode enabled for devId — "
+                    "WC_ALGO_TYPE_HASH falls back to software");
+    }
+
+    ret = set_fn(obj, devId);
+    if (ret != WOLFSSL_SUCCESS) {
+        cfg->tls_safe = prev_tls_safe;
+        if (!was_registered) {
+            wc_CryptoCb_UnRegisterDevice(devId);
+            g_devid_count--;
+            XFREE(cfg, NULL, DYNAMIC_TYPE_TMP_BUFFER);
+            g_devid_table[g_devid_count].devId = 0;
+            g_devid_table[g_devid_count].cfg   = NULL;
         }
+        return ret;
     }
     return 0;
 }
 
-int wc_crypto2dev_assign_devid_ssl(WOLFSSL* ssl)
+static int assign_ctx_setid(void* obj, int devId)
 {
-    int ret;
+    return wolfSSL_CTX_SetDevId((WOLFSSL_CTX*)obj, devId);
+}
 
+static int assign_ssl_setid(void* obj, int devId)
+{
+    return wolfSSL_SetDevId((WOLFSSL*)obj, devId);
+}
+
+int wc_crypto2dev_assign_devid_ex(WOLFSSL_CTX* ctx, int devId)
+{
+    if (ctx == NULL)
+        return BAD_FUNC_ARG;
+    return crypto2dev_assign_devid_impl(devId, assign_ctx_setid, ctx);
+}
+
+int wc_crypto2dev_assign_devid_ssl_ex(WOLFSSL* ssl, int devId)
+{
     if (ssl == NULL)
         return BAD_FUNC_ARG;
+    return crypto2dev_assign_devid_impl(devId, assign_ssl_setid, ssl);
+}
 
-    {
-        int prev_safe_mode = g_tls_safe_mode;
-        g_tls_safe_mode = 1;
-        ret = wc_CryptoCb_RegisterDevice(WOLF_CRYPTO2DEV_DEVID,
-                                         wc_crypto2dev_cb, NULL);
-        if (ret != 0) {
-            g_tls_safe_mode = prev_safe_mode;
-            return ret;
-        }
+int wc_crypto2dev_assign_devid(WOLFSSL_CTX* ctx)
+{
+    if (ctx == NULL)
+        return BAD_FUNC_ARG;
+    return crypto2dev_assign_devid_impl(WOLF_CRYPTO2DEV_DEVID,
+                                        assign_ctx_setid, ctx);
+}
 
-        ret = wolfSSL_SetDevId(ssl, WOLF_CRYPTO2DEV_DEVID);
-        if (ret != WOLFSSL_SUCCESS) {
-            wc_CryptoCb_UnRegisterDevice(WOLF_CRYPTO2DEV_DEVID);
-            g_tls_safe_mode = prev_safe_mode;
-            return ret;
-        }
-    }
-    return 0;
+int wc_crypto2dev_assign_devid_ssl(WOLFSSL* ssl)
+{
+    if (ssl == NULL)
+        return BAD_FUNC_ARG;
+    return crypto2dev_assign_devid_impl(WOLF_CRYPTO2DEV_DEVID,
+                                        assign_ssl_setid, ssl);
 }
 
 #endif /* WOLFSSL_CRYPTO2DEV && WOLF_CRYPTO_CB */
