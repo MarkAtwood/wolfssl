@@ -735,63 +735,6 @@ static int test_hmac_short_key_fallback(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* Test 3f: HMAC oversized input returns WC_HW_E                       */
-/*                                                                     */
-/* The port buffers the entire HMAC input before sending to hardware.  */
-/* Any wc_HmacUpdate call whose running total would exceed             */
-/* WOLFSSL_CRYPTO2DEV_HMAC_MAX_BUF (default 64 KB) must return         */
-/* WC_HW_E.  CRYPTOCB_UNAVAILABLE is NOT safe: the port's HMAC SETKEY  */
-/* returns 0 (claiming the key), so wolfSSL never runs its own ipad/   */
-/* opad schedule; a software fallback would compute HMAC with an       */
-/* all-zeros key and return it as success.                              */
-/* ------------------------------------------------------------------ */
-static int test_hmac_oversized(void)
-{
-    Hmac   hmac;
-    byte   key[20];
-    byte  *big_data = NULL;
-    word32 big_sz   = WOLFSSL_CRYPTO2DEV_HMAC_MAX_BUF + 1u;
-    byte   mac[WC_SHA256_DIGEST_SIZE];
-    int    ret;
-
-    XMEMSET(key, 0x0b, sizeof(key));
-
-    /* Use XMALLOC to avoid a large stack allocation. */
-    big_data = (byte*)XMALLOC(big_sz, NULL, DYNAMIC_TYPE_TMP_BUFFER);
-    if (big_data == NULL)
-        return MEMORY_E;
-    XMEMSET(big_data, 0xAA, big_sz);
-
-    ret = wc_HmacInit(&hmac, NULL, WOLF_CRYPTO2DEV_DEVID);
-    if (ret != 0)
-        goto done;
-
-    ret = wc_HmacSetKey(&hmac, WC_SHA256, key, (word32)sizeof(key));
-    if (ret != 0)
-        goto free_hmac;
-
-    /* Single Update larger than the cap — must return WC_HW_E. */
-    ret = wc_HmacUpdate(&hmac, big_data, big_sz);
-    if (ret != WC_HW_E) {
-        WOLFSSL_MSG("crypto2dev_test: oversized HMAC expected WC_HW_E");
-        if (ret == 0) {
-            /* Clean up if Update incorrectly succeeded. */
-            (void)wc_HmacFinal(&hmac, mac);
-        }
-        ret = -1;
-        goto free_hmac;
-    }
-    WOLFSSL_MSG("crypto2dev_test: HMAC oversized-input rejection test passed");
-    ret = 0;
-
-free_hmac:
-    wc_HmacFree(&hmac);
-done:
-    XFREE(big_data, NULL, DYNAMIC_TYPE_TMP_BUFFER);
-    return ret;
-}
-
-/* ------------------------------------------------------------------ */
 /* Test 3g: HMAC Final + Free lifecycle — no leak or double-free       */
 /*                                                                     */
 /* After wc_HmacFinal(), the port must free the HmacCtx struct and    */
@@ -1152,7 +1095,7 @@ static int test_hmac_copy_devctx_guard(void)
         wc_HmacFree(&src_hmac);
         return ret;
     }
-    /* Update so the streaming buffer (ctx->data) is allocated. */
+    /* Update so the streaming op fd is open (ctx->op_fd >= 0). */
     ret = wc_HmacUpdate(&src_hmac, data, (word32)sizeof(data));
     if (ret != 0) {
         wc_HmacFree(&src_hmac);
@@ -1871,12 +1814,6 @@ int wc_crypto2dev_test(void)
     ret = test_hmac_short_key_fallback();
     if (ret != 0) {
         WOLFSSL_MSG("crypto2dev_test: HMAC short-key fallback FAILED");
-        goto done;
-    }
-
-    ret = test_hmac_oversized();
-    if (ret != 0) {
-        WOLFSSL_MSG("crypto2dev_test: HMAC oversized-input rejection FAILED");
         goto done;
     }
 

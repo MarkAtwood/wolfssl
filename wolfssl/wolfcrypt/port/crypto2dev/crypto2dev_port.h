@@ -57,16 +57,6 @@ typedef struct WOLFSSL      WOLFSSL;
  * affects application code.  A full fix requires upstream wolfSSL to dispatch
  * CryptoCb COPY for HMAC objects, analogous to wc_Sha256Copy(). */
 
-/* Hard limit on total HMAC input buffered per operation (bytes).
- * Any wc_HmacUpdate that would push the running total past this value
- * returns WC_HW_E.  CRYPTOCB_UNAVAILABLE is NOT safe: HMAC SETKEY returns 0
- * (claiming the key), so wolfSSL skips its software ipad/opad schedule; a
- * fallback wc_HmacUpdate would compute HMAC with an all-zeros key.
- * Default: 64 KB — covers TLS record MACs (max ~16 KB) with headroom. */
-#ifndef WOLFSSL_CRYPTO2DEV_HMAC_MAX_BUF
-#define WOLFSSL_CRYPTO2DEV_HMAC_MAX_BUF (64u * 1024u)
-#endif
-
 /* Maximum number of distinct devIds that wc_crypto2dev_register_ex() and
  * wc_crypto2dev_assign_devid_ex() may register simultaneously.  Typical
  * deployments use 1–2 (one TLS devId + one bulk-data devId).  Increase if

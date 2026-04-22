@@ -90,18 +90,22 @@ typedef struct {
     byte   key[128];  /* raw HMAC key bytes (up to SHA-384/SHA-512 block size = 128 bytes) */
     word32 keySz;
     char   algo[CRYPTO2DEV_ALGO_MAXLEN]; /* e.g., "hmac(sha256)" */
-    /* Streaming accumulation buffer — appended on each Update, flushed on Final.
-     * dataCap is the allocated size; dataSz is the used size.  The buffer grows
-     * by doubling so total copy work across N updates is O(total input) not O(N²). */
-    byte*  data;
-    word32 dataSz;
-    word32 dataCap;
+    /* Streaming state: op_fd is the pool fd held from the first wc_HmacUpdate
+     * through wc_HmacFinal.  Sentinels: HMAC_OP_FD_UNINIT (-1) = no Update
+     * called yet; HMAC_OP_FD_ERROR (-2) = an Update failed; Final returns
+     * WC_HW_E.  op_fd >= 0 = active fd, pool_slot is its pool index. */
+    int    op_fd;
+    int    pool_slot;
     /* Anti-aliasing guard: set to the owning Hmac* at allocation time.
      * Detected in crypto2dev_free_hmac and the SETKEY re-key path to prevent
      * double-free when wc_HmacCopy shallow-copies devCtx without calling the
      * CryptoCb COPY handler.  See wolfssl-qsi.2. */
     void*  owner;
 } Crypto2DevHmacCtx;
+
+/* op_fd sentinels for Crypto2DevHmacCtx */
+#define HMAC_OP_FD_UNINIT (-1) /* no Update called yet */
+#define HMAC_OP_FD_ERROR  (-2) /* an Update failed; Final must return WC_HW_E */
 
 typedef struct {
     int  op_fd;      /* open OPERATION fd; -1 = not started */
@@ -1096,10 +1100,10 @@ static int crypto2dev_hmac_setkey_ctx(const wc_CryptoInfo* info)
             hmac->devCtx = NULL;
         }
         else {
-            /* Free any pending accumulation buffer before zeroing the struct. */
-            if (old_ctx->data != NULL) {
-                ForceZero(old_ctx->data, old_ctx->dataCap);
-                XFREE(old_ctx->data, NULL, DYNAMIC_TYPE_TMP_BUFFER);
+            /* Close any active hardware op before re-keying. */
+            if (old_ctx->op_fd >= 0) {
+                close(old_ctx->op_fd);
+                crypto2dev_pool_release(&g_pool, old_ctx->pool_slot);
             }
             ForceZero(hmac->devCtx, sizeof(Crypto2DevHmacCtx));
             XFREE(hmac->devCtx, NULL, DYNAMIC_TYPE_TMP_BUFFER);
@@ -1117,9 +1121,10 @@ static int crypto2dev_hmac_setkey_ctx(const wc_CryptoInfo* info)
     ctx->keySz = keySz;
     XSTRNCPY(ctx->algo, algo, sizeof(ctx->algo) - 1);
     ctx->algo[sizeof(ctx->algo) - 1] = '\0';
-    ctx->owner = hmac;
-    /* ctx->data = NULL; ctx->dataSz = 0; ctx->dataCap = 0 — already zeroed by XMEMSET above */
-    hmac->devCtx = ctx;
+    ctx->owner     = hmac;
+    ctx->op_fd     = HMAC_OP_FD_UNINIT; /* XMEMSET zeros to 0, not -1; set explicitly */
+    ctx->pool_slot = -1;
+    hmac->devCtx   = ctx;
     return 0;
 }
 #endif /* WOLF_CRYPTO_CB_SETKEY */
@@ -1128,8 +1133,6 @@ static int crypto2dev_hmac(const wc_CryptoInfo* info)
 {
     Hmac* hmac = (Hmac*)info->hmac.hmac;
     Crypto2DevHmacCtx* ctx;
-    int op_fd = -1;
-    int pool_slot = -1;
     int ret = 0;
     struct crypto2dev_init_op init_op;
     ssize_t nw, nr;
@@ -1145,97 +1148,96 @@ static int crypto2dev_hmac(const wc_CryptoInfo* info)
      * wolfSSL CryptoCb dispatches HMAC as two callbacks:
      *   Update: wc_HmacUpdate -> (in=data, inSz>0, digest=NULL)
      *   Final:  wc_HmacFinal  -> (in=NULL, inSz=0, digest=buf)
-     * Accumulate data on Update; flush to hardware on Final.
+     * Stream data to hardware on Update; FINALIZE on Final.
      */
     if (info->hmac.digest == NULL) {
-        /* Update phase — append to accumulation buffer with amortized growth.
-         * The entire HMAC input is buffered here and sent to hardware as one
-         * write() at Final time.  True streaming HMAC (stateful fd surviving
-         * across wc_HmacUpdate calls) requires a kernel driver enhancement
-         * not yet supported.
-         * Inputs larger than WOLFSSL_CRYPTO2DEV_HMAC_MAX_BUF (default 64 KB)
-         * return WC_HW_E — see the macro comment for why CRYPTOCB_UNAVAILABLE
-         * is not safe. */
-        word32 need;
+        /* Update phase — stream this chunk directly to the hardware op fd. */
         if (info->hmac.in == NULL)
             return (info->hmac.inSz == 0) ? 0 : BAD_FUNC_ARG;
 
-        if (info->hmac.inSz > (word32)(0xFFFFFFFFu - ctx->dataSz))
-            return BAD_FUNC_ARG;
-        need = ctx->dataSz + info->hmac.inSz;
-
-        if (need > WOLFSSL_CRYPTO2DEV_HMAC_MAX_BUF) {
-            WOLFSSL_MSG("crypto2dev: HMAC input exceeds "
-                        "WOLFSSL_CRYPTO2DEV_HMAC_MAX_BUF — hard failure; "
-                        "increase the limit or chunk via multiple HMAC ops");
+        if (ctx->op_fd == HMAC_OP_FD_ERROR)
             return WC_HW_E;
+
+        if (ctx->op_fd == HMAC_OP_FD_UNINIT) {
+            /* First Update: acquire pool fd and INIT with key. */
+            ctx->op_fd = crypto2dev_pool_acquire(&g_pool, &ctx->pool_slot);
+            if (ctx->op_fd < 0) {
+                if (g_pool.slots != NULL)
+                    WOLFSSL_MSG("crypto2dev: HMAC pool exhausted — increase "
+                                "WOLFSSL_CRYPTO2DEV_POOL_SIZE");
+                ctx->op_fd = HMAC_OP_FD_ERROR;
+                return WC_HW_E;
+            }
+            XMEMSET(&init_op, 0, sizeof(init_op));
+            XMEMCPY(init_op.algo, ctx->algo, sizeof(init_op.algo));
+            init_op.op     = CRYPTO2DEV_OP_HASH;
+            init_op.keylen = ctx->keySz;
+            XMEMCPY(init_op.key, ctx->key, ctx->keySz);
+            init_op.key_fd = -1;
+            if (ioctl(ctx->op_fd, CRYPTO2DEV_IOC_INIT, &init_op) < 0) {
+                ret = crypto2dev_to_wc_err(errno);
+                /* EOPNOTSUPP/ENOSYS/ENOENT: device lacks this HMAC algo.
+                 * Must NOT return CRYPTOCB_UNAVAILABLE: SETKEY already
+                 * returned 0 (claimed), so a software fallback would compute
+                 * HMAC with an all-zeros key.  Return WC_HW_E. */
+                if (ret == NOT_COMPILED_IN)
+                    ret = WC_HW_E;
+                ForceZero(&init_op, sizeof(init_op));
+                close(ctx->op_fd);
+                crypto2dev_pool_release(&g_pool, ctx->pool_slot);
+                ctx->op_fd     = HMAC_OP_FD_ERROR;
+                ctx->pool_slot = -1;
+                return ret;
+            }
+            ForceZero(&init_op, sizeof(init_op));
         }
 
-        if (need > ctx->dataCap) {
-            word32 new_cap = (ctx->dataCap > 0) ? ctx->dataCap * 2 : 1024u;
-            byte* new_data;
-            /* Cap after doubling so allocation never exceeds the max even
-             * when dataCap was just under HMAC_MAX_BUF/2. */
-            if (new_cap > WOLFSSL_CRYPTO2DEV_HMAC_MAX_BUF)
-                new_cap = WOLFSSL_CRYPTO2DEV_HMAC_MAX_BUF;
-            if (new_cap < need)
-                new_cap = need;
-            new_data = (byte*)XMALLOC(new_cap, NULL, DYNAMIC_TYPE_TMP_BUFFER);
-            if (new_data == NULL)
-                return MEMORY_E;
-            if (ctx->data != NULL) {
-                XMEMCPY(new_data, ctx->data, ctx->dataSz);
-                ForceZero(ctx->data, ctx->dataCap);
-                XFREE(ctx->data, NULL, DYNAMIC_TYPE_TMP_BUFFER);
+        if (info->hmac.inSz > 0) {
+            nw = write(ctx->op_fd, info->hmac.in, info->hmac.inSz);
+            if (nw != (ssize_t)info->hmac.inSz) {
+                ret = (nw < 0) ? crypto2dev_to_wc_err(errno) : WC_HW_E;
+                close(ctx->op_fd);
+                crypto2dev_pool_release(&g_pool, ctx->pool_slot);
+                ctx->op_fd     = HMAC_OP_FD_ERROR;
+                ctx->pool_slot = -1;
+                return ret;
             }
-            ctx->data    = new_data;
-            ctx->dataCap = new_cap;
         }
-        XMEMCPY(ctx->data + ctx->dataSz, info->hmac.in, info->hmac.inSz);
-        ctx->dataSz += info->hmac.inSz;
         return 0;
     }
 
-    /* Final phase — flush accumulated data to hardware and read MAC. */
-    op_fd = crypto2dev_pool_acquire(&g_pool, &pool_slot);
-    if (op_fd < 0) {
-        /* Pool exhausted (or destroyed) at Final time.  Free the ctx so
-         * wc_HmacFree does not re-enter this path with a stale devCtx. */
-        if (g_pool.slots != NULL)
-            WOLFSSL_MSG("crypto2dev: HMAC pool exhausted — increase "
-                        "WOLFSSL_CRYPTO2DEV_POOL_SIZE");
+    /* Final phase — FINALIZE and read the MAC. */
+    if (ctx->op_fd == HMAC_OP_FD_ERROR) {
         ret = WC_HW_E;
         goto done;
     }
 
-    XMEMSET(&init_op, 0, sizeof(init_op));
-    XMEMCPY(init_op.algo, ctx->algo, sizeof(init_op.algo)); /* already zeroed */
-    init_op.op     = CRYPTO2DEV_OP_HASH;
-    init_op.keylen = ctx->keySz;
-    XMEMCPY(init_op.key, ctx->key, ctx->keySz);
-    init_op.key_fd = -1;
-    if (ioctl(op_fd, CRYPTO2DEV_IOC_INIT, &init_op) < 0) {
-        ret = crypto2dev_to_wc_err(errno);
-        /* EOPNOTSUPP/ENOSYS/ENOENT → NOT_COMPILED_IN: device lacks this HMAC algo
-         * (no provider registered, or provider not FIPS-validated).
-         * Do NOT return CRYPTOCB_UNAVAILABLE: Update calls already returned 0
-         * (claimed), so wolfSSL's software HMAC state has no accumulated data.
-         * A software Final fallback would compute HMAC over empty input.
-         * Return WC_HW_E to surface a hard failure with no silent fallback. */
-        if (ret == NOT_COMPILED_IN)
+    if (ctx->op_fd == HMAC_OP_FD_UNINIT) {
+        /* Final with no prior Updates: HMAC of empty message.
+         * Acquire pool fd and INIT with key before FINALIZE. */
+        ctx->op_fd = crypto2dev_pool_acquire(&g_pool, &ctx->pool_slot);
+        if (ctx->op_fd < 0) {
+            if (g_pool.slots != NULL)
+                WOLFSSL_MSG("crypto2dev: HMAC pool exhausted — increase "
+                            "WOLFSSL_CRYPTO2DEV_POOL_SIZE");
             ret = WC_HW_E;
-        goto done;
-    }
-
-    if (ctx->dataSz > 0) {
-        nw = write(op_fd, ctx->data, ctx->dataSz);
-        if (nw != (ssize_t)ctx->dataSz) {
-            ret = (nw < 0) ? crypto2dev_to_wc_err(errno) : WC_HW_E;
+            goto done;
+        }
+        XMEMSET(&init_op, 0, sizeof(init_op));
+        XMEMCPY(init_op.algo, ctx->algo, sizeof(init_op.algo));
+        init_op.op     = CRYPTO2DEV_OP_HASH;
+        init_op.keylen = ctx->keySz;
+        XMEMCPY(init_op.key, ctx->key, ctx->keySz);
+        init_op.key_fd = -1;
+        if (ioctl(ctx->op_fd, CRYPTO2DEV_IOC_INIT, &init_op) < 0) {
+            ret = crypto2dev_to_wc_err(errno);
+            if (ret == NOT_COMPILED_IN)
+                ret = WC_HW_E;
             goto done;
         }
     }
 
-    if (ioctl(op_fd, CRYPTO2DEV_IOC_FINALIZE, NULL) < 0) {
+    if (ioctl(ctx->op_fd, CRYPTO2DEV_IOC_FINALIZE, NULL) < 0) {
         ret = crypto2dev_to_wc_err(errno);
         goto done;
     }
@@ -1250,7 +1252,7 @@ static int crypto2dev_hmac(const wc_CryptoInfo* info)
                 ret = BAD_FUNC_ARG;
                 goto done;
         }
-        nr = read(op_fd, info->hmac.digest, mac_sz);
+        nr = read(ctx->op_fd, info->hmac.digest, mac_sz);
         if (nr != (ssize_t)mac_sz) {
             ret = (nr < 0) ? crypto2dev_to_wc_err(errno) : WC_HW_E;
             goto done;
@@ -1258,17 +1260,9 @@ static int crypto2dev_hmac(const wc_CryptoInfo* info)
     }
 
 done:
-    if (op_fd >= 0) {
-        close(op_fd);
-        crypto2dev_pool_release(&g_pool, pool_slot);
-    }
-    /* Zero and free the accumulation buffer.  ForceZero prevents
-     * dead-store elimination (XMEMSET on a block about to be XFREE'd
-     * can be elided by the optimizer, leaving HMAC input data readable
-     * in the heap after free). */
-    if (ctx->data != NULL) {
-        ForceZero(ctx->data, ctx->dataCap);
-        XFREE(ctx->data, NULL, DYNAMIC_TYPE_TMP_BUFFER);
+    if (ctx->op_fd >= 0) {
+        close(ctx->op_fd);
+        crypto2dev_pool_release(&g_pool, ctx->pool_slot);
     }
     /* Free the HmacCtx struct and clear the pointer.
      *
@@ -1379,13 +1373,10 @@ static int crypto2dev_free_hmac(const wc_CryptoInfo* info)
         hmac->devCtx = NULL;
         return 0;
     }
-    /* Free any pending accumulation buffer (abandoned before Final). */
-    if (ctx->data != NULL) {
-        ForceZero(ctx->data, ctx->dataCap);
-        XFREE(ctx->data, NULL, DYNAMIC_TYPE_TMP_BUFFER);
-        ctx->data    = NULL;
-        ctx->dataSz  = 0;
-        ctx->dataCap = 0;
+    /* Close any open hardware op (abandoned before Final). */
+    if (ctx->op_fd >= 0) {
+        close(ctx->op_fd);
+        crypto2dev_pool_release(&g_pool, ctx->pool_slot);
     }
     ForceZero(hmac->devCtx, sizeof(Crypto2DevHmacCtx));
     XFREE(hmac->devCtx, NULL, DYNAMIC_TYPE_TMP_BUFFER);
