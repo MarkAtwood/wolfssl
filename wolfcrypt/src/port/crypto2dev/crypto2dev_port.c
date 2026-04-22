@@ -1612,32 +1612,24 @@ int wc_crypto2dev_init(int pool_size)
 
 #ifdef WOLFSSL_CRYPTO2DEV_REQUIRE_FIPS
     {
-        /* Verify that a FIPS provider is currently loaded by issuing
-         * REQUIRE_FIPS on a probe fd.  If it fails (no FIPS provider
-         * registered), reject init entirely.
+        /* Verify that the wolfKM FIPS provider is loaded and passing its
+         * POST via CRYPTO2DEV_IOC_STATUS.  This catches both cases that
+         * REQUIRE_FIPS probe-fd approach missed:
+         *   FIPS_NO_PROVIDER: no FIPS provider loaded at all.
+         *   FIPS_NOT_OPERATIONAL: provider loaded but failing POST.
          *
-         * Why a probe fd is sufficient:
-         *   The kernel registry maintains a global fips_provider_count.
-         *   While that count is > 0, crypto2dev_lookup_algo() silently
-         *   skips all non-FIPS providers for EVERY fd, process-wide.
-         *   Additionally, fips_gate() is called at the top of every write()
-         *   and read() handler on initialized fds: if the FIPS provider
-         *   unloads or fails its self-test AFTER init, the next write() or
-         *   read() on any pool fd returns -EACCES immediately.
-         *
-         *   Setting REQUIRE_FIPS on individual pool fds would be redundant:
-         *   the global registry filter already ensures the same guarantee.
-         *   The probe simply checks that we are in FIPS mode at startup;
-         *   the kernel enforces it for all subsequent operations on all fds. */
-        int fips_probe_fd = open(CRYPTO2DEV_PATH, O_RDWR | O_CLOEXEC);
-        if (fips_probe_fd < 0)
-            return WC_HW_E;
-        if (ioctl(fips_probe_fd, CRYPTO2DEV_IOC_REQUIRE_FIPS, NULL) < 0) {
-            close(fips_probe_fd);
-            WOLFSSL_MSG("crypto2dev: FIPS provider not available");
+         * The kernel enforces FIPS gating at every write()/read() via
+         * fips_gate(); this check is only a startup-time assertion.
+         * Continued FIPS health is guaranteed by -EACCES returns from
+         * pool operations if the provider fails after init. */
+        int fips;
+        ret = wc_crypto2dev_fips_status(&fips);
+        if (ret != 0)
+            return ret;  /* device unreachable */
+        if (fips != CRYPTO2DEV_FIPS_OPERATIONAL) {
+            WOLFSSL_MSG("crypto2dev: FIPS provider not operational");
             return FIPS_NOT_ALLOWED_E;
         }
-        close(fips_probe_fd);
     }
 #endif /* WOLFSSL_CRYPTO2DEV_REQUIRE_FIPS */
 
@@ -1693,6 +1685,33 @@ int wc_crypto2dev_pool_stats(int* out_in_use, int* out_total)
     return 0;
 }
 
+int wc_crypto2dev_fips_status(int* out_fips_state)
+{
+    struct crypto2dev_status st;
+    int fd;
+    int rc;
+
+    if (out_fips_state == NULL)
+        return BAD_FUNC_ARG;
+
+    fd = open(CRYPTO2DEV_PATH, O_RDWR | O_CLOEXEC);
+    if (fd < 0) {
+        WOLFSSL_MSG("crypto2dev: fips_status — cannot open device");
+        return WC_HW_E;
+    }
+
+    XMEMSET(&st, 0, sizeof(st));
+    rc = ioctl(fd, CRYPTO2DEV_IOC_STATUS, &st);
+    close(fd);
+    if (rc < 0) {
+        WOLFSSL_MSG("crypto2dev: fips_status — CRYPTO2DEV_IOC_STATUS failed");
+        return WC_HW_E;
+    }
+
+    *out_fips_state = (int)st.fips_state;
+    return 0;
+}
+
 int wc_crypto2dev_selftest(void)
 {
     /* Arbitrary stable test data — not secret; software path is the oracle.
@@ -1723,6 +1742,31 @@ int wc_crypto2dev_selftest(void)
     if (!g_pool_inited || g_pool.slots == NULL) {
         WOLFSSL_MSG("crypto2dev: selftest called before wc_crypto2dev_init()");
         return WC_HW_E;
+    }
+
+    /* Reject if WOLF_CRYPTO2DEV_DEVID is not registered: the AES oracle
+     * would silently use software for both paths, the comparison always
+     * passes, and the test returns 0 without ever touching hardware. */
+    if (crypto2dev_find_devid(WOLF_CRYPTO2DEV_DEVID) < 0) {
+        WOLFSSL_MSG("crypto2dev: selftest requires WOLF_CRYPTO2DEV_DEVID to be registered "
+                    "— call wc_crypto2dev_register() before wc_crypto2dev_selftest()");
+        return WC_HW_E;
+    }
+
+    /* Reject immediately if the kernel FIPS provider is loaded but failing
+     * its own POST.  A device in this state returns -EACCES on all crypto
+     * ops; running the AES-GCM oracle would give WC_HW_E which is true but
+     * less informative than FIPS_NOT_ALLOWED_E. */
+    {
+        int fips;
+        ret = wc_crypto2dev_fips_status(&fips);
+        if (ret == 0 && fips == CRYPTO2DEV_FIPS_NOT_OPERATIONAL) {
+            WOLFSSL_MSG("crypto2dev: selftest — FIPS provider loaded but not operational");
+            return FIPS_NOT_ALLOWED_E;
+        }
+        /* WC_HW_E from fips_status means the device is completely unreachable;
+         * fall through to the AES-GCM test which will surface the same error
+         * with more context (encrypt vs decrypt failure). */
     }
 
     /* Software oracle: encrypt with INVALID_DEVID (pure software AES-GCM). */

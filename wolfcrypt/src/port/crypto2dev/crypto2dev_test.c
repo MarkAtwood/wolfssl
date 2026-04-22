@@ -1787,6 +1787,35 @@ static int test_pool_stats(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* Test: wc_crypto2dev_fips_status                                      */
+/* ------------------------------------------------------------------ */
+static int test_fips_status(void)
+{
+    int fips = -1;
+    int ret;
+
+    ret = wc_crypto2dev_fips_status(NULL);
+    if (ret != BAD_FUNC_ARG) {
+        WOLFSSL_MSG("crypto2dev_test: fips_status(NULL) should be BAD_FUNC_ARG");
+        return -1;
+    }
+
+    ret = wc_crypto2dev_fips_status(&fips);
+    if (ret != 0) {
+        WOLFSSL_MSG("crypto2dev_test: fips_status failed");
+        return ret;
+    }
+    if (fips != CRYPTO2DEV_FIPS_NO_PROVIDER &&
+        fips != CRYPTO2DEV_FIPS_OPERATIONAL  &&
+        fips != CRYPTO2DEV_FIPS_NOT_OPERATIONAL) {
+        WOLFSSL_MSG("crypto2dev_test: fips_status returned unknown fips_state");
+        return -1;
+    }
+    WOLFSSL_MSG("crypto2dev_test: fips_status passed");
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
 /* Test: wc_crypto2dev_selftest                                         */
 /* ------------------------------------------------------------------ */
 #ifdef HAVE_AESGCM
@@ -1874,6 +1903,12 @@ int wc_crypto2dev_test(void)
     ret = test_pool_stats();
     if (ret != 0) {
         WOLFSSL_MSG("crypto2dev_test: pool_stats FAILED");
+        goto done;
+    }
+
+    ret = test_fips_status();
+    if (ret != 0) {
+        WOLFSSL_MSG("crypto2dev_test: fips_status FAILED");
         goto done;
     }
 

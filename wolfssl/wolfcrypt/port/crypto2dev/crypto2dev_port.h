@@ -47,6 +47,15 @@ typedef struct WOLFSSL      WOLFSSL;
 #define WOLF_CRYPTO2DEV_DEVID  ((int)0x43324456)
 #endif
 
+/* FIPS aggregate state constants — returned by wc_crypto2dev_fips_status().
+ * Mirror the kernel uapi CRYPTO2DEV_FIPS_* constants in crypto2dev_ioctl.h.
+ * The numeric values must remain in sync with the kernel. */
+#ifndef CRYPTO2DEV_FIPS_NO_PROVIDER
+#define CRYPTO2DEV_FIPS_NO_PROVIDER     0   /* no FIPS-gated provider loaded */
+#define CRYPTO2DEV_FIPS_OPERATIONAL     1   /* FIPS provider(s) loaded and passing POST */
+#define CRYPTO2DEV_FIPS_NOT_OPERATIONAL 2   /* FIPS provider loaded but failing POST */
+#endif
+
 /* wc_HmacCopy() limitation: wolfSSL's wc_HmacCopy() does a raw XMEMCPY of the
  * Hmac struct and does NOT dispatch through CryptoCb COPY.  If the source Hmac
  * object has an active hardware devCtx (set by wc_HmacSetKey() via this port),
@@ -86,13 +95,32 @@ WOLFSSL_API int wc_crypto2dev_cb(int devId, wc_CryptoInfo* info, void* ctx);
  * has not been initialized.  Thread-safe; takes the pool lock briefly. */
 WOLFSSL_API int wc_crypto2dev_pool_stats(int* out_in_use, int* out_total);
 
+/* FIPS state query: reads the wolfKM aggregate FIPS state via
+ * CRYPTO2DEV_IOC_STATUS on a temporary /dev/crypto2dev fd.
+ *
+ * On success, *out_fips_state is set to one of:
+ *   CRYPTO2DEV_FIPS_NO_PROVIDER  (0): no FIPS-gated provider is loaded.
+ *   CRYPTO2DEV_FIPS_OPERATIONAL  (1): FIPS provider(s) loaded and passing POST.
+ *   CRYPTO2DEV_FIPS_NOT_OPERATIONAL (2): FIPS provider loaded but failing POST.
+ *
+ * Does NOT require wc_crypto2dev_init() — safe to call before init and after
+ * cleanup.  Opens /dev/crypto2dev, issues the ioctl, and closes the fd.
+ * Thread-safe (no shared state).
+ *
+ * Returns 0 on success, BAD_FUNC_ARG if out_fips_state is NULL,
+ * WC_HW_E if the device is unavailable or the ioctl fails. */
+WOLFSSL_API int wc_crypto2dev_fips_status(int* out_fips_state);
+
 /* Device liveness check: runs an AES-128-GCM encrypt/decrypt round-trip
  * against WOLF_CRYPTO2DEV_DEVID and cross-validates against the wolfSSL
  * software path (INVALID_DEVID).  Returns 0 if the device produces the
  * same result as software; WC_HW_E if the device is unavailable, returns
- * wrong output, or wc_crypto2dev_init() has not been called.
+ * wrong output, or wc_crypto2dev_init() has not been called;
+ * FIPS_NOT_ALLOWED_E if wc_crypto2dev_fips_status() reports NOT_OPERATIONAL.
  *
- * Requires WOLF_CRYPTO2DEV_DEVID to be registered.  Call after a WC_HW_E
+ * Requires WOLF_CRYPTO2DEV_DEVID to be registered via wc_crypto2dev_register()
+ * or wc_crypto2dev_assign_devid(); returns WC_HW_E immediately if not registered.
+ * Call after a WC_HW_E
  * to distinguish a device failure from a transient pool-exhaustion event
  * (wc_crypto2dev_pool_stats will show available slots in the latter case).
  *

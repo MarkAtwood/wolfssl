@@ -113,6 +113,15 @@
 #define CRYPTO2DEV_OP_HASH             3
 #endif
 
+/* FIPS aggregate state — returned in struct crypto2dev_status.fips_state
+ * and readable via /sys/class/misc/crypto2dev/fips_state.
+ * Matches the kernel uapi CRYPTO2DEV_FIPS_* constants. */
+#ifndef CRYPTO2DEV_FIPS_NO_PROVIDER
+#define CRYPTO2DEV_FIPS_NO_PROVIDER      0   /* no FIPS-gated provider loaded */
+#define CRYPTO2DEV_FIPS_OPERATIONAL      1   /* FIPS provider(s) loaded and passing */
+#define CRYPTO2DEV_FIPS_NOT_OPERATIONAL  2   /* FIPS provider loaded but failing POST */
+#endif
+
 /* ------------------------------------------------------------------ */
 /* Wire structs                                                         */
 /*                                                                     */
@@ -202,6 +211,22 @@ struct crypto2dev_key_generate_op {
     unsigned char _pad[4]; /* pads struct to 104 bytes (multiple of 8) */
 };
 
+/*
+ * Module-level status query — CRYPTO2DEV_IOC_STATUS.
+ * Not FIPS-gated; works on any open /dev/crypto2dev fd without prior INIT.
+ *
+ * fips_state:     one of CRYPTO2DEV_FIPS_NO_PROVIDER / _OPERATIONAL / _NOT_OPERATIONAL.
+ * num_algorithms: total algorithms registered across all providers.
+ * version:        crypto2dev module version string.
+ * _reserved:      reserved; callers must ignore; kernel writes zero.
+ */
+struct crypto2dev_status {
+    unsigned int  fips_state;
+    unsigned int  num_algorithms;
+    char          version[32];
+    unsigned char _reserved[24]; /* pads struct to 64 bytes (multiple of 8) */
+};
+
 struct crypto2dev_kdf_op {
     char          algo    [CRYPTO2DEV_ALGO_MAXLEN];
     char          out_algo[CRYPTO2DEV_ALGO_MAXLEN];
@@ -231,6 +256,8 @@ struct crypto2dev_kdf_op {
 #define CRYPTO2DEV_IOC_SET_AAD     _IOW(CRYPTO2DEV_IOC_MAGIC,  3, struct crypto2dev_aad_op)
 #define CRYPTO2DEV_IOC_GET_TAG     _IOR(CRYPTO2DEV_IOC_MAGIC,  4, struct crypto2dev_tag_op)
 #define CRYPTO2DEV_IOC_SET_TAG     _IOW(CRYPTO2DEV_IOC_MAGIC,  5, struct crypto2dev_tag_op)
+/* slots 6–8 not used by this port */
+#define CRYPTO2DEV_IOC_STATUS      _IOR(CRYPTO2DEV_IOC_MAGIC,  9, struct crypto2dev_status)
 #define CRYPTO2DEV_IOC_KEY_IMPORT  _IOW(CRYPTO2DEV_IOC_MAGIC, 11, struct crypto2dev_key_import_op)
 #define CRYPTO2DEV_IOC_KEY_GENERATE _IOW(CRYPTO2DEV_IOC_MAGIC, 12, struct crypto2dev_key_generate_op)
 #define CRYPTO2DEV_IOC_DO_SIGN     _IOWR(CRYPTO2DEV_IOC_MAGIC, 16, struct crypto2dev_sign_op)
@@ -267,5 +294,7 @@ wc_static_assert2(sizeof(struct crypto2dev_key_generate_op) == 104,
     "crypto2dev_key_generate_op size mismatch");
 wc_static_assert2(sizeof(struct crypto2dev_kdf_op)         == 472,
     "crypto2dev_kdf_op size mismatch");
+wc_static_assert2(sizeof(struct crypto2dev_status)         ==  64,
+    "crypto2dev_status size mismatch — update version[] or _reserved[] fields");
 
 #endif /* WOLFSSL_PORT_CRYPTO2DEV_WIRE_H */
