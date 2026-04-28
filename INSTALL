@@ -322,3 +322,40 @@ We also have vcpkg ports for wolftpm, wolfmqtt and curl.
 
     Deprecated. wolfSSL now has its own XMMS/XMSS^MT implementation in
     wolfCrypt.
+
+21. Generating OmniBOR build artifact graph (Bomsh)
+
+    wolfSSL supports generating an OmniBOR artifact dependency graph using
+    the Bomsh project (https://github.com/omnibor/bomsh).  OmniBOR provides
+    cryptographic traceability from every binary artifact back to the exact
+    source files that produced it.
+
+    Prerequisites:
+      - bomtrace3 (build from https://github.com/omnibor/bomsh)
+      - bomsh_create_bom.py (from the bomsh scripts/ directory, in PATH)
+      - bomsh_sbom.py (optional; from bomsh scripts/, for SPDX enrichment)
+
+    Both bomtrace3 and the Python scripts are detected by configure.
+    make bomsh fails with a clear error message if either required tool
+    is missing.
+
+    Usage:
+
+      $ ./configure
+      $ make
+      $ make bomsh
+
+    This performs a clean rebuild of wolfSSL under bomtrace3 tracing,
+    then produces an OmniBOR artifact graph in omnibor/ in the build
+    directory.  If bomsh_sbom.py is available and a wolfssl-<ver>.spdx.json
+    exists (from 'make sbom'), it also produces an OmniBOR-enriched SPDX
+    document omnibor.wolfssl-<ver>.spdx.json.
+
+    To install:
+
+      $ make install-bomsh   # installs omnibor/ to $(datadir)/doc/wolfssl/
+      $ make uninstall-bomsh # removes installed files
+
+    The generated files are removed by make clean.
+
+    See doc/BOMSH.md for full details.

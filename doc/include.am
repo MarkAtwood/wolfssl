@@ -21,3 +21,4 @@ clean-local:
 	-rm -rf doc/html/
 	-rm -f doc/refman.pdf
 	-rm -f doc/doxygen_warnings
+	-rm -rf $(BOMSH_OMNIBORDIR)
