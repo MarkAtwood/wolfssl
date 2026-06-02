@@ -1369,7 +1369,7 @@ static int caliptra_setkey(const wc_CryptoInfo* info)
             if (dst_key == NULL || src_key == NULL ||
                     field_sz == 0 || field_sz > ECC_MAXSIZE)
                 return BAD_FUNC_ARG;
-            ret = mp_to_unsigned_bin_len(&src_key->k, ecc_buf, (int)field_sz);
+            ret = mp_to_unsigned_bin_len(src_key->k, ecc_buf, (int)field_sz);
             if (ret != MP_OKAY)
                 goto cleanup;
             devctx_ptr = (void**)&dst_key->devCtx;
@@ -1416,7 +1416,10 @@ static int caliptra_setkey(const wc_CryptoInfo* info)
         *devctx_ptr = NULL;
     }
 
-    CALIPTRA_ALLOC(new_cmk, CaliptraCmk);
+    /* new_cmk persists beyond this function (stored in *devctx_ptr);
+     * it is always heap-allocated regardless of WOLFSSL_CALIPTRA_STATIC_BUFFERS. */
+    new_cmk = (CaliptraCmk*)XMALLOC(sizeof(CaliptraCmk),
+                                     NULL, DYNAMIC_TYPE_TMP_BUFFER);
     if (new_cmk == NULL) {
         ret = MEMORY_E;
         goto cleanup;
@@ -1424,14 +1427,15 @@ static int caliptra_setkey(const wc_CryptoInfo* info)
 
     ret = wc_caliptra_import_key(key_data, key_len, key_usage, new_cmk);
     if (ret != 0) {
-        CALIPTRA_FREE(new_cmk);
+        XFREE(new_cmk, NULL, DYNAMIC_TYPE_TMP_BUFFER);
+        new_cmk = NULL;
         goto cleanup;
     }
 
     *devctx_ptr = new_cmk;
 
 cleanup:
-    ForceZero(ecc_buf, sizeof(ecc_buf));
+    wc_ForceZero(ecc_buf, sizeof(ecc_buf));
     return ret;
 }
 #endif /* WOLF_CRYPTO_CB_SETKEY */
