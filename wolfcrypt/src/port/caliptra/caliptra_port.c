@@ -863,6 +863,7 @@ static int caliptra_aesgcm_decrypt(wc_CryptoInfo* info)
     byte*        out    = info->cipher.aesgcm_dec.out;
     word32       sz     = info->cipher.aesgcm_dec.sz;
     const byte*  iv     = info->cipher.aesgcm_dec.iv;
+    word32       ivSz   = info->cipher.aesgcm_dec.ivSz;
     const byte*  authIn = info->cipher.aesgcm_dec.authIn;
     word32       authInSz = info->cipher.aesgcm_dec.authInSz;
     const byte*  authTag  = info->cipher.aesgcm_dec.authTag;
@@ -900,6 +901,13 @@ static int caliptra_aesgcm_decrypt(wc_CryptoInfo* info)
     if (authTag == NULL && authTagSz > 0)
         return BAD_FUNC_ARG;
     if (iv == NULL)
+        return BAD_FUNC_ARG;
+    /* Caliptra's CM_AES_GCM_DECRYPT_INIT command takes a fixed 12-byte IV
+     * (mailbox.rs CmAesGcmDecryptInitReq.iv == [u32; 3]).  Reject any
+     * shorter buffer up front rather than risking an OOB read at the
+     * XMEMCPY below.  wolfSSL's core wc_AesGcmDecrypt() validates ivSz>0
+     * but does not require ivSz==12. */
+    if (ivSz < 12)
         return BAD_FUNC_ARG;
 
     /* --- Step 1: Decrypt Init (IV, AAD, CMK) --- */
