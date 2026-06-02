@@ -1,10 +1,13 @@
 /* caliptra_sim.c — software simulation of the Caliptra cryptographic mailbox
  *
- * Implements caliptra_mailbox_exec() for use in test harnesses.
- * All internal crypto uses wolfSSL software (WC_NO_DEVID) to avoid recursion
- * through the CryptoCb framework.
+ * Implements caliptra_mailbox_exec() for use in test harnesses and as the
+ * default backend for --enable-caliptra builds without integrator-supplied
+ * mailbox hardware (see --enable-caliptra-sim in configure.ac).
  *
- * This file is test-only; it is NOT part of the wolfSSL library.
+ * All internal crypto uses wolfSSL software (WC_NO_DEVID) to avoid recursion
+ * through the CryptoCb framework.  Random bytes use wc_RNG_GenerateBlock so
+ * the sim is portable across every platform wolfSSL itself supports rather
+ * than relying on /dev/urandom.
  */
 
 #include <wolfssl/wolfcrypt/settings.h>
@@ -21,8 +24,6 @@
 
 #include <string.h>
 #include <stdio.h>
-#include <fcntl.h>
-#include <unistd.h>
 
 /* Use INVALID_DEVID for all internal wolfSSL calls to avoid CryptoCb recursion.
  * WC_NO_DEVID is not defined in this wolfSSL build; INVALID_DEVID (-2) has
@@ -247,28 +248,24 @@ static void sim_aes_free(int idx_0based)
 }
 
 /* =========================================================================
- * Random bytes from /dev/urandom
+ * Random bytes via wolfSSL's RNG (portable across all supported platforms).
+ * Returns 0 on success, non-zero on failure.
  * ========================================================================= */
 
 static int sim_get_random(byte* buf, word32 len)
 {
-    int fd;
-    ssize_t n;
-    word32 off = 0;
+    WC_RNG rng;
+    int    ret;
 
-    fd = open("/dev/urandom", O_RDONLY);
-    if (fd < 0) return -1;
+    if (buf == NULL && len > 0) return -1;
+    if (len == 0)               return 0;
 
-    while (off < len) {
-        n = read(fd, buf + off, len - off);
-        if (n <= 0) {
-            close(fd);
-            return -1;
-        }
-        off += (word32)n;
-    }
-    close(fd);
-    return 0;
+    ret = wc_InitRng_ex(&rng, NULL, WC_NO_DEVID);
+    if (ret != 0) return -1;
+
+    ret = wc_RNG_GenerateBlock(&rng, buf, len);
+    (void)wc_FreeRng(&rng);
+    return (ret == 0) ? 0 : -1;
 }
 
 /* =========================================================================
