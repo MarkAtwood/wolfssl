@@ -662,7 +662,7 @@ static int sim_handle_aes_enc_init(const CmAesGcmEncryptInitReq* req,
         return -1;
     }
 
-    if (key->key_len > 32) {
+    if (key->key_len != 32) {  /* Real Caliptra hw is AES-256 only */
         resp->hdr.fips_status = HTOLE32(0xFF);
         return -1;
     }
@@ -847,7 +847,7 @@ static int sim_handle_aes_dec_init(const CmAesGcmDecryptInitReq* req,
         return -1;
     }
 
-    if (key->key_len > 32) {
+    if (key->key_len != 32) {  /* Real Caliptra hw is AES-256 only */
         resp->hdr.fips_status = HTOLE32(0xFF);
         return -1;
     }
