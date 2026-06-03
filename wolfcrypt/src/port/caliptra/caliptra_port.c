@@ -682,6 +682,14 @@ int wc_caliptra_hmac(const CaliptraCmk* cmk,
                                 resp, (word32)sizeof(*resp));
     if (ret != 0) goto hmac_done;
     if (LE32TOH(resp->hdr.fips_status) != 0) { ret = WC_HW_E; goto hmac_done; }
+    /* Validate firmware-reported MAC length matches the algorithm digest
+     * size before copying.  Same pattern as RNG (line ~316) and SHA Final
+     * (line ~542): a mismatch indicates firmware misbehavior and is a
+     * WC_HW_E rather than a silent truncation/overrun. */
+    if (LE32TOH(resp->hdr.data_len) != digest_sz) {
+        ret = WC_HW_E;
+        goto hmac_done;
+    }
 
     XMEMCPY(mac_out, resp->mac, digest_sz);
     *mac_len = digest_sz;
@@ -746,6 +754,11 @@ static int caliptra_aesgcm_encrypt(wc_CryptoInfo* info)
     if (sz > (word32)CMB_MAX_DATA_SIZE)
         return BUFFER_E; /* Caliptra single-Update limit; chunked input not yet supported */
     if (sz > 0 && in == NULL)
+        return BAD_FUNC_ARG;
+    /* Symmetric with the in NULL check above: if there is plaintext to
+     * encrypt then there must be somewhere to write the ciphertext.
+     * wolfSSL's core path validates this, defense-in-depth. */
+    if (sz > 0 && out == NULL)
         return BAD_FUNC_ARG;
     /* Defense-in-depth: wolfSSL's core wc_AesGcmEncrypt validates the tag
      * arguments before dispatching to CryptoCb, but a caller bypassing the
@@ -1078,8 +1091,12 @@ static int caliptra_aesgcm_decrypt(wc_CryptoInfo* info)
     if (ret != 0) goto dec_done;
     if (LE32TOH(final_resp->hdr.fips_status) != 0) { ret = WC_HW_E; goto dec_done; }
 
-    /* tag_verified == 0 means authentication failure (1 = tags match). */
-    if (LE32TOH(final_resp->tag_verified) == 0)
+    /* tag_verified == 1 means tags match (per CmAesGcmDecryptFinalResp
+     * header documentation).  Use fail-safe semantics: anything other
+     * than the explicit "1 = OK" value is treated as an authentication
+     * failure.  This protects against an out-of-spec firmware or a
+     * mailbox transport that fails to populate the field correctly. */
+    if (LE32TOH(final_resp->tag_verified) != 1)
         ret = AES_GCM_AUTH_E;
 
 dec_done:
@@ -1153,6 +1170,13 @@ static int caliptra_ecdsa_sign(wc_CryptoInfo* info)
     if (key->devCtx == NULL)
         return CRYPTOCB_UNAVAILABLE;
     if (hashSz > (word32)CMB_MAX_DATA_SIZE)
+        return BAD_FUNC_ARG;
+    /* Caliptra ECDSA only implements P-384; reject other curves up front
+     * rather than relying on the firmware to reject them after a round
+     * trip.  key->dp is the curve descriptor (set by wc_ecc_set_curve or
+     * wc_ecc_import_*); dp->size == 48 is the canonical P-384 indicator
+     * used elsewhere in wolfcrypt/src/ecc.c. */
+    if (key->dp == NULL || key->dp->size != 48)
         return BAD_FUNC_ARG;
 
     CALIPTRA_ALLOC(CmEcdsaSignReq,  req_s,  req);
@@ -1515,6 +1539,24 @@ int wc_caliptra_import_key(const byte*  key_data,
         return BAD_FUNC_ARG;
     if (key_len == 0)
         return BAD_FUNC_ARG;
+    /* Validate key_usage against the documented CMB_KEY_USAGE_* values.
+     * Catches typos at import time (when the caller still has source-level
+     * context for the bad value) rather than at use time (when the
+     * mailbox command rejects the CMK with WC_HW_E and a confusing
+     * error path).  Accepts every firmware-defined value, including
+     * MLDSA/MLKEM which this port does not currently dispatch but which
+     * may be exposed via wc_caliptra_import_key for application-level
+     * use (e.g. attestation key material). */
+    switch (key_usage) {
+        case CMB_KEY_USAGE_HMAC:
+        case CMB_KEY_USAGE_AES:
+        case CMB_KEY_USAGE_ECDSA:
+        case CMB_KEY_USAGE_MLDSA:
+        case CMB_KEY_USAGE_MLKEM:
+            break;
+        default:
+            return BAD_FUNC_ARG;
+    }
 
     CALIPTRA_ALLOC(CmImportReq,  req_s,  req);
     CALIPTRA_ALLOC(CmImportResp, resp_s, resp);
