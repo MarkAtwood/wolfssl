@@ -76627,6 +76627,75 @@ ecdsa_cleanup:
             goto caliptra_done;
     }
 
+    /* ---------------------------------------------------------------
+     * Test 7: HMAC streaming via wc_HmacSetKey/Update with a CMK in
+     * hmac->devCtx must be rejected with WC_HW_E.
+     *
+     * Caliptra HMAC is single-shot only: the mailbox command requires
+     * all message data in one transfer.  wolfSSL's streaming Hmac API
+     * (wc_HmacInit / SetKey / Update / Final) cannot be plumbed through.
+     * caliptra_port.c's caliptra_hmac() returns WC_HW_E (NOT
+     * CRYPTOCB_UNAVAILABLE) when hmac->devCtx is non-NULL, which prevents
+     * wolfSSL from falling through to software HMAC over an unauthorized
+     * key.  This test pins that contract: a wc_HmacSetKey or wc_HmacUpdate
+     * call against a Caliptra-routed Hmac MUST return WC_HW_E.
+     * --------------------------------------------------------------- */
+    {
+        CaliptraCmk hmac_cmk;
+        Hmac        h;
+        int         hmac_init_ok = 0;
+        int         streaming_ret;
+
+        XMEMSET(&hmac_cmk, 0, sizeof(hmac_cmk));
+
+        ret = (wc_test_ret_t)wc_caliptra_import_key(hmac_key,
+                                                     sizeof(hmac_key),
+                                                     CMB_KEY_USAGE_HMAC,
+                                                     &hmac_cmk);
+        if (ret != 0) {
+            printf("caliptra_test: HMAC streaming import key failed %d\n",
+                   (int)ret);
+            ret = WC_TEST_RET_ENC_EC(ret);
+            goto caliptra_done;
+        }
+
+        ret = (wc_test_ret_t)wc_HmacInit(&h, HEAP_HINT, WOLF_CALIPTRA_DEVID);
+        if (ret != 0) {
+            printf("caliptra_test: HMAC streaming wc_HmacInit failed %d\n",
+                   (int)ret);
+            wc_caliptra_delete_key(&hmac_cmk);
+            ret = WC_TEST_RET_ENC_EC(ret);
+            goto caliptra_done;
+        }
+        hmac_init_ok = 1;
+        h.devCtx = &hmac_cmk;
+
+        /* wc_HmacSetKey dispatches through CryptoCb's HMAC callback (with
+         * digest == NULL, in == NULL, inSz == 0).  caliptra_hmac() sees
+         * h->devCtx != NULL and returns WC_HW_E unconditionally.  If
+         * wolfSSL ever changes its dispatch order to call Update first,
+         * Update also routes through caliptra_hmac() with the same outcome,
+         * so accept WC_HW_E from either call. */
+        streaming_ret = wc_HmacSetKey(&h, WC_SHA384,
+                                       hmac_key, sizeof(hmac_key));
+        if (streaming_ret == 0) {
+            /* SetKey did not fail; Update must. */
+            streaming_ret = wc_HmacUpdate(&h, hmac_msg, sizeof(hmac_msg));
+        }
+
+        if (hmac_init_ok)
+            wc_HmacFree(&h);
+        wc_caliptra_delete_key(&hmac_cmk);
+
+        if (streaming_ret != WC_HW_E) {
+            printf("caliptra_test: HMAC streaming expected WC_HW_E (%d) but "
+                   "got %d\n", WC_HW_E, streaming_ret);
+            ret = WC_TEST_RET_ENC_NC;
+            goto caliptra_done;
+        }
+        printf("caliptra_test: HMAC streaming rejection passed\n");
+    }
+
 caliptra_done:
     wc_CryptoCb_UnRegisterDevice(WOLF_CALIPTRA_DEVID);
     wc_caliptra_cleanup();
