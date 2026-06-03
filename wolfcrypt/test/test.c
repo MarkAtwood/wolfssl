@@ -75978,6 +75978,59 @@ WOLFSSL_TEST_SUBROUTINE wc_test_ret_t caliptra_test(void)
         printf("caliptra_test: SHA-384 abort-cleanup passed\n");
     }
 
+#ifdef WOLFSSL_SHA512
+    /* ---------------------------------------------------------------
+     * Test 3e: SHA-512 abort-cleanup path
+     * Same shape as Test 3d but for SHA-512.  Exercises the
+     * WC_HASH_TYPE_SHA512 arm of caliptra_hash_free, which is a
+     * separate switch case from WC_HASH_TYPE_SHA384 (different cast
+     * target: wc_Sha512* vs wc_Sha384*).
+     * --------------------------------------------------------------- */
+    {
+        wc_Sha512 sha;
+
+        XMEMSET(&sha, 0, sizeof(sha));
+
+        ret = (wc_test_ret_t)wc_InitSha512_ex(&sha, HEAP_HINT,
+                                                WOLF_CALIPTRA_DEVID);
+        if (ret != 0) {
+            printf("caliptra_test: SHA-512 abort: wc_InitSha512_ex "
+                   "failed %d\n", (int)ret);
+            ret = WC_TEST_RET_ENC_EC(ret);
+            goto caliptra_done;
+        }
+
+        ret = (wc_test_ret_t)wc_Sha512Update(&sha, (const byte*)"abc", 3);
+        if (ret != 0) {
+            printf("caliptra_test: SHA-512 abort: wc_Sha512Update "
+                   "failed %d\n", (int)ret);
+            wc_Sha512Free(&sha);
+            ret = WC_TEST_RET_ENC_EC(ret);
+            goto caliptra_done;
+        }
+
+        if (sha.devCtx == NULL) {
+            printf("caliptra_test: SHA-512 abort: devCtx unexpectedly NULL "
+                   "after Update (no abort path to exercise)\n");
+            wc_Sha512Free(&sha);
+            ret = WC_TEST_RET_ENC_NC;
+            goto caliptra_done;
+        }
+
+        /* Skip Final.  Go straight to Free. */
+        wc_Sha512Free(&sha);
+
+        if (sha.devCtx != NULL) {
+            printf("caliptra_test: SHA-512 abort: devCtx not freed by "
+                   "wc_Sha512Free (caliptra_hash_free did not run or "
+                   "did not clear devCtx)\n");
+            ret = WC_TEST_RET_ENC_NC;
+            goto caliptra_done;
+        }
+        printf("caliptra_test: SHA-512 abort-cleanup passed\n");
+    }
+#endif /* WOLFSSL_SHA512 */
+
     /* ---------------------------------------------------------------
      * Test 4: AES-256-GCM KAT (decrypt)
      * Decrypt a known ciphertext using a caller-supplied IV against
@@ -76152,6 +76205,96 @@ WOLFSSL_TEST_SUBROUTINE wc_test_ret_t caliptra_test(void)
             goto caliptra_done;
         }
         printf("caliptra_test: AES-256-GCM round-trip passed\n");
+    }
+
+    /* ---------------------------------------------------------------
+     * Test 4b': AES-256-GCM round-trip with empty plaintext (sz=0)
+     * Exercises the caliptra_aesgcm_encrypt/decrypt path that skips the
+     * Update mailbox call entirely (sz == 0 branch in the port).
+     * NIST GCM permits zero-length plaintext with optional AAD; the
+     * round-trip should yield an empty plaintext and a tag that
+     * authenticates over only the AAD (here, NULL).
+     * --------------------------------------------------------------- */
+    {
+        Aes         aes;
+        CaliptraCmk aes_cmk;
+        byte        ciphertext[1]; /* unused, but non-NULL placeholder */
+        byte        recovered[1];
+        byte        auth_tag[16];
+        byte        iv[12];
+
+        XMEMSET(&aes_cmk,   0, sizeof(aes_cmk));
+        XMEMSET(ciphertext, 0, sizeof(ciphertext));
+        XMEMSET(recovered,  0, sizeof(recovered));
+        XMEMSET(auth_tag,   0, sizeof(auth_tag));
+        XMEMSET(iv,         0, sizeof(iv));
+
+        ret = (wc_test_ret_t)wc_caliptra_import_key(aes_key,
+                                                     sizeof(aes_key),
+                                                     CMB_KEY_USAGE_AES,
+                                                     &aes_cmk);
+        if (ret != 0) {
+            printf("caliptra_test: empty-message import AES key failed "
+                   "%d\n", (int)ret);
+            ret = WC_TEST_RET_ENC_EC(ret);
+            goto caliptra_done;
+        }
+
+        ret = (wc_test_ret_t)wc_AesInit(&aes, HEAP_HINT,
+                                         WOLF_CALIPTRA_DEVID);
+        if (ret == 0)
+            ret = (wc_test_ret_t)wc_AesGcmSetKey(&aes, aes_key,
+                                                  sizeof(aes_key));
+        if (ret != 0) {
+            printf("caliptra_test: empty-message AES init/setkey failed "
+                   "%d\n", (int)ret);
+            wc_caliptra_delete_key(&aes_cmk);
+            ret = WC_TEST_RET_ENC_EC(ret);
+            goto caliptra_done;
+        }
+        aes.devCtx = &aes_cmk;
+
+        /* Encrypt with sz=0; the port skips the Update mailbox call. */
+        ret = (wc_test_ret_t)wc_AesGcmEncrypt(&aes,
+                                               ciphertext, ciphertext, 0,
+                                               iv, sizeof(iv),
+                                               auth_tag, sizeof(auth_tag),
+                                               NULL, 0);
+        if (ret != 0) {
+            printf("caliptra_test: empty-message wc_AesGcmEncrypt "
+                   "failed %d\n", (int)ret);
+            wc_AesFree(&aes);
+            wc_caliptra_delete_key(&aes_cmk);
+            ret = WC_TEST_RET_ENC_EC(ret);
+            goto caliptra_done;
+        }
+
+        ret = (wc_test_ret_t)wc_caliptra_aesgcm_get_iv(&aes, iv, sizeof(iv));
+        if (ret != 0) {
+            printf("caliptra_test: empty-message get_iv failed %d\n",
+                   (int)ret);
+            wc_AesFree(&aes);
+            wc_caliptra_delete_key(&aes_cmk);
+            ret = WC_TEST_RET_ENC_EC(ret);
+            goto caliptra_done;
+        }
+
+        /* Decrypt sz=0; port also skips the Update mailbox call. */
+        ret = (wc_test_ret_t)wc_AesGcmDecrypt(&aes,
+                                               recovered, ciphertext, 0,
+                                               iv, sizeof(iv),
+                                               auth_tag, sizeof(auth_tag),
+                                               NULL, 0);
+        wc_AesFree(&aes);
+        wc_caliptra_delete_key(&aes_cmk);
+        if (ret != 0) {
+            printf("caliptra_test: empty-message wc_AesGcmDecrypt "
+                   "failed %d\n", (int)ret);
+            ret = WC_TEST_RET_ENC_EC(ret);
+            goto caliptra_done;
+        }
+        printf("caliptra_test: AES-256-GCM empty-message round-trip "
+               "passed\n");
     }
 
     /* ---------------------------------------------------------------
