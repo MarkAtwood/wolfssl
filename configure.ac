@@ -3232,6 +3232,7 @@ fi
 if test "x$ENABLED_CALIPTRA_SIM" = "xyes"
 then
     AM_CFLAGS="$AM_CFLAGS -DWOLFSSL_CALIPTRA_SIM"
+    AC_MSG_WARN([Caliptra software simulator enabled (default). This is for offline development and test only -- production builds must pass --disable-caliptra-sim and supply a real caliptra_mailbox_exec() implementation.])
 fi
 
 

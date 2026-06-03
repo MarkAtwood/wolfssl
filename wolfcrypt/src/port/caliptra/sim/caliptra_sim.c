@@ -50,6 +50,19 @@
 #include <string.h>
 #include <stdio.h>
 
+/* Make every build of the software simulator visibly noisy: this file
+ * implements caliptra_mailbox_exec() in software for offline test/dev
+ * usage only.  Production deployments MUST link against the real
+ * Caliptra hardware mailbox via --disable-caliptra-sim plus an
+ * integrator-supplied caliptra_mailbox_exec().
+ *
+ * Uses #pragma message rather than #warning so that builds running with
+ * -Werror=cpp (the default for wolfSSL) still surface the advisory
+ * without aborting the build. */
+#if defined(__GNUC__) || defined(__clang__)
+#pragma message ("caliptra_sim.c: software simulator only -- must --disable-caliptra-sim for production")
+#endif
+
 /* =========================================================================
  * Single mailbox-serialization mutex (HIGH-46 mitigation).
  *

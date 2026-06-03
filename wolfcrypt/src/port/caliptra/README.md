@@ -235,7 +235,12 @@ Production test coverage lives in `wolfcrypt/test/test.c` under
 The `wolfcrypt/src/port/caliptra/sim/` directory contains two test backends:
 
 - **`caliptra_sim.c`** — software mailbox stub for offline development (no
-  external dependencies).
+  external dependencies). **Not for production use.** This file is built
+  into `libwolfssl` by default when `--enable-caliptra` is used; production
+  deployments **must** pass `--disable-caliptra-sim` and link an
+  integrator-supplied `caliptra_mailbox_exec()` that talks to real Caliptra
+  hardware. Both `configure` and the C compiler will emit explicit warnings
+  whenever the simulator is included in the build.
 - **`caliptra_hwmodel.c`** + **`Makefile`** — runs `caliptra_test.c` against
   real Caliptra firmware via the [chipsalliance/caliptra-sw][caliptra-sw]
   hw-model C binding.
