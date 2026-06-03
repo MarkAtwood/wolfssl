@@ -75574,6 +75574,7 @@ WOLFSSL_TEST_SUBROUTINE wc_test_ret_t caliptra_test(void)
     if (ret != 0) {
         printf("caliptra_test: wc_CryptoCb_RegisterDevice failed %d\n",
                (int)ret);
+        wc_caliptra_cleanup();
         return WC_TEST_RET_ENC_EC(ret);
     }
 
