@@ -73,24 +73,32 @@ static int bytes_eq(const byte* a, const byte* b, int len)
 static void test_rng(void)
 {
     WC_RNG rng;
-    byte buf[32];
+    byte buf1[32];
+    byte buf2[32];
     int ret;
     int any_nonzero = 0;
     int i;
 
-    memset(buf, 0, sizeof(buf));
+    memset(buf1, 0, sizeof(buf1));
+    memset(buf2, 0, sizeof(buf2));
 
     ret = wc_InitRng_ex(&rng, NULL, WOLF_CALIPTRA_DEVID);
-    if (ret == 0) {
-        ret = wc_RNG_GenerateBlock(&rng, buf, sizeof(buf));
-        wc_FreeRng(&rng);
-    }
+    if (ret == 0)
+        ret = wc_RNG_GenerateBlock(&rng, buf1, sizeof(buf1));
+    if (ret == 0)
+        ret = wc_RNG_GenerateBlock(&rng, buf2, sizeof(buf2));
+    wc_FreeRng(&rng);
 
     for (i = 0; i < 32; i++) {
-        if (buf[i]) any_nonzero = 1;
+        if (buf1[i]) any_nonzero = 1;
     }
 
-    TEST("RNG generates nonzero", ret == 0 && any_nonzero);
+    /* Two successive 32-byte generations from the same RNG must differ.
+     * Catches a stuck-at-constant DRBG (e.g. a transport that returns
+     * a cached buffer instead of running the firmware DRBG) which a
+     * single nonzero-bytes check would not detect. */
+    TEST("RNG generates nonzero and non-repeating",
+         ret == 0 && any_nonzero && !bytes_eq(buf1, buf2, 32));
 }
 
 /* =========================================================================
@@ -210,6 +218,9 @@ static void test_sha256_multiupdate(void)
 
 static void test_aesgcm_roundtrip(void)
 {
+    /* TEST-ONLY: NIST AES-256 test vector key from FIPS 197 / SP 800-38D.
+     * Not for production use; reused across this file's AES-GCM tests for
+     * traceability against published vectors. */
     static const byte aes_key[32] = {
         0x60, 0x3d, 0xeb, 0x10, 0x15, 0xca, 0x71, 0xbe,
         0x2b, 0x73, 0xae, 0xf0, 0x85, 0x7d, 0x77, 0x81,
@@ -489,6 +500,10 @@ static void test_hmac_sha384(void)
 
 static void test_aesgcm_auth_failure(void)
 {
+    /* TEST-ONLY: same NIST AES-256 test vector key as test_aesgcm_roundtrip.
+     * Hoisting to file scope was rejected as more change than necessary;
+     * the duplication is intentional so each test function reads as
+     * self-contained when reviewed in isolation. */
     static const byte aes_key[32] = {
         0x60, 0x3d, 0xeb, 0x10, 0x15, 0xca, 0x71, 0xbe,
         0x2b, 0x73, 0xae, 0xf0, 0x85, 0x7d, 0x77, 0x81,
