@@ -325,6 +325,15 @@ static int caliptra_rng(wc_CryptoInfo* info)
     }
 
 rng_done:
+    /* Defense-in-depth: on any error, zero the partial output buffer.
+     * The chunked loop above may have written some random bytes before
+     * failing (e.g. a multi-chunk request where the second chunk fails);
+     * those bytes are conceptually "leaked randomness" but more
+     * importantly a caller that ignores the error return could consume
+     * a partially-filled buffer.  Mirrors the wc_caliptra_hmac error-
+     * zeroing pattern. */
+    if (ret != 0 && info->rng.out != NULL && info->rng.sz > 0)
+        wc_ForceZero(info->rng.out, info->rng.sz);
     CALIPTRA_FREE(req);
     CALIPTRA_FREE(resp);
     return ret;
@@ -394,10 +403,13 @@ static int caliptra_sha_do_init(void** devctx_ptr, int alg_id,
 do_init_done:
     CALIPTRA_FREE(init_req);
     CALIPTRA_FREE(init_resp);
-    if (ret == 0)
+    if (ret == 0) {
         *devctx_ptr = sha_ctx;
-    else
+    }
+    else {
+        wc_ForceZero(sha_ctx, sizeof(*sha_ctx));
         XFREE(sha_ctx, NULL, DYNAMIC_TYPE_TMP_BUFFER);
+    }
     return ret;
 }
 
@@ -536,6 +548,7 @@ static int caliptra_hash(wc_CryptoInfo* info)
         }
 
         /* Clean up per-object state */
+        wc_ForceZero(sha_ctx, sizeof(*sha_ctx));
         XFREE(sha_ctx, NULL, DYNAMIC_TYPE_TMP_BUFFER);
         *devctx_ptr = NULL;
         sha_ctx = NULL;
@@ -553,6 +566,7 @@ hash_done:
          * handler covers the abort-before-final case when the application
          * frees the hash object without completing the digest. */
         if (*devctx_ptr != NULL) {
+            wc_ForceZero(*devctx_ptr, sizeof(CaliptraShaCtx));
             XFREE(*devctx_ptr, NULL, DYNAMIC_TYPE_TMP_BUFFER);
             *devctx_ptr = NULL;
         }
@@ -1305,7 +1319,12 @@ static int caliptra_ecdsa_verify(wc_CryptoInfo* info)
     *res = (LE32TOH(ver_resp->hdr.fips_status) == 0) ? 1 : 0;
 
 ver_cleanup:
-    CALIPTRA_FREE(ver_req);
+    /* ver_req holds the CaliptraCmk and the hash to verify; both are
+     * sensitive (the CMK is an opaque handle that grants firmware access
+     * to the public key, the hash may carry pre-image leakage).  Match
+     * the FREE_SENSITIVE discipline used by every other CMK-bearing
+     * request struct in this port (HMAC, AES-GCM, ECDSA sign, import). */
+    CALIPTRA_FREE_SENSITIVE(ver_req);
     CALIPTRA_FREE(ver_resp);
     return ret;
 }
@@ -1372,6 +1391,7 @@ static int caliptra_hash_free(wc_CryptoInfo* info)
     }
 
     if (devctx_ptr != NULL && *devctx_ptr != NULL) {
+        wc_ForceZero(*devctx_ptr, sizeof(CaliptraShaCtx));
         XFREE(*devctx_ptr, NULL, DYNAMIC_TYPE_TMP_BUFFER);
         *devctx_ptr = NULL;
     }

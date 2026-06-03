@@ -76621,6 +76621,12 @@ WOLFSSL_TEST_SUBROUTINE wc_test_ret_t caliptra_test(void)
         }
 
 ecdsa_cleanup:
+        /* Zero the stack-resident P-384 private scalar.  priv_bytes holds
+         * the exported private key for the duration of the test and would
+         * otherwise remain on the stack until overwritten by later
+         * activity, regardless of whether we got here via success or
+         * an error goto. */
+        ForceZero(priv_bytes, sizeof(priv_bytes));
         if (raw_init)  { wc_ecc_free(&raw_key); raw_init = 0; }
         if (rng_init)  { wc_FreeRng(&ecdsa_rng); rng_init = 0; }
         if (ret != 0)
