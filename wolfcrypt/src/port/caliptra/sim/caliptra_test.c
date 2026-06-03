@@ -376,25 +376,20 @@ static void test_ecdsa_sign_verify(void)
 /* =========================================================================
  * Test 8: HMAC-SHA-384 matches software reference
  *
- * The Caliptra HMAC mailbox command is single-shot: all message data must be
- * present in one mailbox call.  wolfSSL's CryptoCb HMAC callback is invoked
- * once per wc_HmacUpdate() (digest == NULL) and once at wc_HmacFinal()
- * (in == NULL, inSz == 0, digest != NULL).
+ * The Caliptra HMAC mailbox command is single-shot: all message data must
+ * be present in one mailbox call.  wolfSSL's CryptoCb HMAC callback is
+ * invoked once per wc_HmacUpdate() and once at wc_HmacFinal(), so the
+ * streaming Hmac API cannot be plumbed through to Caliptra.  caliptra_port.c
+ * returns WC_HW_E (not CRYPTOCB_UNAVAILABLE) when hmac->devCtx is set, which
+ * prevents wolfSSL from falling through to software HMAC over an unauthorized
+ * key.  See the compile-time assertion in caliptra_port.c that enforces
+ * WC_HW_E != CRYPTOCB_UNAVAILABLE for this reason.
  *
- * caliptra_port.c returns CRYPTOCB_UNAVAILABLE for both cases:
- *   - Update: digest == NULL guard causes SW fallback so wolfSSL accumulates
- *     data internally.
- *   - Final after SW accumulation: in == NULL && inSz == 0 guard causes SW
- *     fallback so wolfSSL completes the HMAC over the accumulated data.
- *
- * As a result, wc_HmacUpdate/wc_HmacFinal always run in software even when
- * devCtx is set.  Caliptra HMAC can only be invoked by calling
- * caliptra_mailbox_exec(CM_HMAC, ...) directly, which is the only supported
- * path for Caliptra HMAC.
- *
- * This test validates Caliptra HMAC correctness by calling caliptra_mailbox_exec
- * directly (single-shot), then comparing the result against a wolfSSL software
- * HMAC reference.
+ * The supported path is wc_caliptra_hmac() — a single-shot wrapper around
+ * the CM_HMAC mailbox command.  This test exercises wc_caliptra_hmac and
+ * cross-validates against a wolfSSL software HMAC computed with
+ * INVALID_DEVID (bypasses CryptoCb).  Same idiom as wolfcrypt/test/test.c
+ * caliptra_test() Test 5.
  * ========================================================================= */
 
 static void test_hmac_sha384(void)
@@ -413,16 +408,15 @@ static void test_hmac_sha384(void)
     static const word32 msg_len = 4;
 
     CaliptraCmk hmac_cmk;
-    CmHmacReq   req;
-    CmHmacResp  resp;
-    byte mac[48];
-    Hmac sw_hmac;
-    byte sw_mac[48];
-    word32 req_len;
-    int ret;
+    byte   caliptra_mac[48];
+    word32 caliptra_mac_len = sizeof(caliptra_mac);
+    byte   sw_mac[48];
+    Hmac   sw_hmac;
+    int    ret;
 
-    memset(mac,    0, sizeof(mac));
-    memset(sw_mac, 0, sizeof(sw_mac));
+    memset(&hmac_cmk,    0, sizeof(hmac_cmk));
+    memset(caliptra_mac, 0, sizeof(caliptra_mac));
+    memset(sw_mac,       0, sizeof(sw_mac));
 
     /* Import the HMAC key into the Caliptra sim */
     ret = wc_caliptra_import_key(hmac_key, 48, CMB_KEY_USAGE_HMAC, &hmac_cmk);
@@ -431,48 +425,17 @@ static void test_hmac_sha384(void)
         return;
     }
 
-    /* Call Caliptra HMAC mailbox directly (single-shot).
-     * The firmware verifies: sum(cmd_id bytes) + sum(req[4..req_len]) + chksum == 0
-     * so we must compute and fill hdr.chksum before calling caliptra_mailbox_exec. */
-    memset(&req, 0, sizeof(req));
-    memcpy(&req.cmk, &hmac_cmk, sizeof(CaliptraCmk));
-    req.hash_algorithm = CMB_SHA_ALG_SHA384;
-    req.data_size      = msg_len;
-    memcpy(req.data, msg, msg_len);
-
-    req_len = (word32)(sizeof(req) - CMB_MAX_DATA_SIZE + msg_len);
-
-    /* Compute checksum over cmd_id bytes and req payload (bytes [4..req_len]) */
-    {
-        const byte *buf = (const byte*)&req;
-        word32 sum = 0;
-        word32 i;
-        sum += (byte)(CM_HMAC);
-        sum += (byte)(CM_HMAC >> 8);
-        sum += (byte)(CM_HMAC >> 16);
-        sum += (byte)(CM_HMAC >> 24);
-        for (i = sizeof(word32); i < req_len; i++)
-            sum += buf[i];
-        req.hdr.chksum = 0u - sum;
-    }
-
-    memset(&resp, 0, sizeof(resp));
-    ret = caliptra_mailbox_exec(CM_HMAC, &req, req_len, &resp, (word32)sizeof(resp));
-    if (ret == 0 && resp.hdr.fips_status == 0) {
-        memcpy(mac, resp.mac, 48);
-    } else {
-        ret = (ret != 0) ? ret : -1;
-    }
-
+    /* Caliptra HMAC via the supported single-shot wrapper */
+    ret = wc_caliptra_hmac(&hmac_cmk, WC_SHA384, msg, msg_len,
+                           caliptra_mac, &caliptra_mac_len);
     wc_caliptra_delete_key(&hmac_cmk);
-
-    if (ret != 0) {
+    if (ret != 0 || caliptra_mac_len != 48) {
         TEST("HMAC-SHA-384 matches software", 0);
         return;
     }
 
-    /* Software reference using wolfSSL */
-    ret = wc_HmacInit(&sw_hmac, NULL, WC_NO_DEVID);
+    /* Software reference using INVALID_DEVID to bypass CryptoCb */
+    ret = wc_HmacInit(&sw_hmac, NULL, INVALID_DEVID);
     if (ret == 0) {
         ret = wc_HmacSetKey(&sw_hmac, WC_SHA384, hmac_key, 48);
         if (ret == 0)
@@ -483,7 +446,7 @@ static void test_hmac_sha384(void)
     }
 
     TEST("HMAC-SHA-384 matches software",
-         ret == 0 && bytes_eq(mac, sw_mac, 48));
+         ret == 0 && bytes_eq(caliptra_mac, sw_mac, 48));
 }
 
 /* =========================================================================
