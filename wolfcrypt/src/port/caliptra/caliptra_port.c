@@ -112,6 +112,14 @@ static word32 caliptra_req_chksum(word32 cmd_id, const void *req, word32 req_len
     const byte *buf = (const byte*)req;
     word32 sum = 0;
     word32 i;
+    /* Defense-in-depth: a NULL req is a caller bug (chksum precondition is
+     * "all payload populated"), but return a deterministic 0 rather than
+     * dereferencing.  Likewise clamp req_len to sizeof(cmd_id) so callers
+     * that pass a too-short length still get a well-defined cmd_id-only
+     * checksum instead of skipping the payload loop with an arbitrary i
+     * starting value. */
+    if (req == NULL) return 0u;
+    if (req_len < sizeof(word32)) req_len = sizeof(word32);
     sum += (byte)(cmd_id);
     sum += (byte)(cmd_id >> 8);
     sum += (byte)(cmd_id >> 16);
@@ -345,6 +353,8 @@ static int caliptra_sha_do_init(void** devctx_ptr, int alg_id,
     int             ret;
 
     if (data_sz > 0 && data == NULL)
+        return BAD_FUNC_ARG;
+    if (data_sz > (word32)CMB_MAX_DATA_SIZE)
         return BAD_FUNC_ARG;
 
     /* sha_ctx persists beyond this function (stored in hash->devCtx);
@@ -723,6 +733,12 @@ static int caliptra_aesgcm_encrypt(wc_CryptoInfo* info)
         return BUFFER_E; /* Caliptra single-Update limit; chunked input not yet supported */
     if (sz > 0 && in == NULL)
         return BAD_FUNC_ARG;
+    /* Defense-in-depth: wolfSSL's core wc_AesGcmEncrypt validates the tag
+     * arguments before dispatching to CryptoCb, but a caller bypassing the
+     * standard API or using a future CryptoCb client must still see an
+     * error rather than silently producing unauthenticated ciphertext. */
+    if (authTag == NULL || authTagSz == 0)
+        return BAD_FUNC_ARG;
 
     /* Caliptra generates the IV server-side; the caller-supplied iv/ivSz are
      * silently ignored.  wolfSSL's wc_AesGcmEncrypt requires ivSz > 0 as a
@@ -857,6 +873,15 @@ static int caliptra_aesgcm_encrypt(wc_CryptoInfo* info)
     }
 
 enc_done:
+    /* On encrypt error, clear the IV that was stashed in aes->reg at line
+     * ~767 above.  A misbehaving caller that ignores the encrypt error
+     * and calls wc_caliptra_aesgcm_get_iv() afterwards will then see an
+     * all-zero IV, which causes wc_AesGcmDecrypt to fail GMAC verification
+     * downstream rather than silently using a stale or partially-written
+     * value. */
+    if (ret != 0 && aes != NULL)
+        XMEMSET(aes->reg, 0, 12);
+
     /* init_req: aad; upd_req: plaintext; upd_resp/final_resp: ciphertext + tag.
      * Plaintext is the obvious sensitive material; ciphertext less so but
      * may still be sensitive to side-channel reuse.  Zero everything. */
@@ -1044,13 +1069,16 @@ static int caliptra_aesgcm_decrypt(wc_CryptoInfo* info)
         ret = AES_GCM_AUTH_E;
 
 dec_done:
-    /* Plaintext was written to out[] during Update (line ~979) before the
-     * tag could be verified.  On authentication failure the caller MUST
-     * NOT use that plaintext — it is attacker-influenced via the
-     * chosen-ciphertext.  Defense-in-depth: zero out[] here so a caller
-     * that ignores the error return cannot accidentally consume
-     * unauthenticated plaintext. */
-    if (ret == AES_GCM_AUTH_E && out != NULL && sz > 0)
+    /* Plaintext is written to out[] during Update (line ~979) before the
+     * tag is verified, and may also be partially written before any error
+     * after that point.  On ANY error (auth fail, FIPS status, mailbox
+     * transport, OOM after Update) the caller MUST NOT use out[] —
+     * it is either unauthenticated or partially written.  wolfSSL's
+     * convention is that on error, the contents of out[] are undefined.
+     * Defense-in-depth: zero out[] on every error so a caller that
+     * ignores the error return cannot accidentally consume unauthenticated
+     * or partial plaintext. */
+    if (ret != 0 && out != NULL && sz > 0)
         wc_ForceZero(out, sz);
 
     /* upd_req: ciphertext; upd_resp: plaintext.  Plaintext is sensitive;
