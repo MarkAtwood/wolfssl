@@ -48,7 +48,6 @@
 #endif
 
 #include <string.h>
-#include <stdio.h>
 
 /* Make every build of the software simulator visibly noisy: this file
  * implements caliptra_mailbox_exec() in software for offline test/dev
@@ -168,7 +167,7 @@ static int sim_key_alloc(void)
     int i;
     for (i = 0; i < SIM_MAX_KEYS; i++) {
         if (!sim_keys[i].in_use) {
-            memset(&sim_keys[i], 0, sizeof(SimKey));
+            XMEMSET(&sim_keys[i], 0, sizeof(SimKey));
             sim_keys[i].in_use = 1;
             return i;   /* 0-based index */
         }
@@ -188,7 +187,7 @@ static SimKey* sim_key_lookup(const byte cmk[128])
 
 static void sim_cmk_from_index(byte cmk[128], int idx_0based)
 {
-    memset(cmk, 0, 128);
+    XMEMSET(cmk, 0, 128);
     put_le32(cmk, (word32)(idx_0based + 1));
 }
 
@@ -219,7 +218,7 @@ static int sim_sha_alloc(void)
     int i;
     for (i = 0; i < SIM_MAX_SHA_SLOTS; i++) {
         if (!sim_sha[i].in_use) {
-            memset(&sim_sha[i], 0, sizeof(SimShaSlot));
+            XMEMSET(&sim_sha[i], 0, sizeof(SimShaSlot));
             sim_sha[i].in_use = 1;
             return i;
         }
@@ -239,7 +238,7 @@ static SimShaSlot* sim_sha_lookup(const byte ctx[200])
 
 static void sim_sha_ctx_from_index(byte ctx[200], int idx_0based)
 {
-    memset(ctx, 0, 200);
+    XMEMSET(ctx, 0, 200);
     put_le32(ctx, (word32)(idx_0based + 1));
 }
 
@@ -253,7 +252,7 @@ static void sim_sha_free(int idx_0based)
         case SHA_512:  wc_Sha512Free(&slot->u.sha512); break;
         case SHA_NONE: break;
     }
-    memset(slot, 0, sizeof(*slot));
+    XMEMSET(slot, 0, sizeof(*slot));
 }
 
 /* =========================================================================
@@ -295,7 +294,7 @@ static int sim_aes_alloc(void)
     int i;
     for (i = 0; i < SIM_MAX_AES_SLOTS; i++) {
         if (!sim_aes[i].in_use) {
-            memset(&sim_aes[i], 0, sizeof(SimAesSlot));
+            XMEMSET(&sim_aes[i], 0, sizeof(SimAesSlot));
             sim_aes[i].in_use = 1;
             return i;
         }
@@ -315,10 +314,10 @@ static SimAesSlot* sim_aes_lookup(const byte ctx[128])
 
 static void sim_aes_ctx_from_index(byte ctx[128], int idx_0based, const byte iv[12])
 {
-    memset(ctx, 0, 128);
+    XMEMSET(ctx, 0, 128);
     put_le32(ctx, (word32)(idx_0based + 1));
     if (iv != NULL)
-        memcpy(ctx + 4, iv, 12);
+        XMEMCPY(ctx + 4, iv, 12);
 }
 
 static void sim_aes_free(int idx_0based)
@@ -361,7 +360,7 @@ static int sim_handle_import(const CmImportReq* req, word32 req_len,
 
     (void)req_len;
 
-    memset(resp, 0, sizeof(*resp));
+    XMEMSET(resp, 0, sizeof(*resp));
 
     idx = sim_key_alloc();
     if (idx < 0) {
@@ -374,7 +373,7 @@ static int sim_handle_import(const CmImportReq* req, word32 req_len,
 
     sim_keys[idx].key_len = key_len;
     if (key_len > 0)
-        memcpy(sim_keys[idx].key_data, req->input, key_len);
+        XMEMCPY(sim_keys[idx].key_data, req->input, key_len);
 
     {
     word32 key_usage = LE32TOH(req->key_usage);
@@ -409,7 +408,7 @@ static int sim_handle_delete(const CmDeleteReq* req, word32 req_len,
     word32 idx;
     (void)req_len;
 
-    memset(resp, 0, sizeof(*resp));
+    XMEMSET(resp, 0, sizeof(*resp));
 
     idx = get_le32(req->cmk.bytes);
     if (idx == 0 || idx > (word32)SIM_MAX_KEYS) {
@@ -436,7 +435,7 @@ static int sim_handle_sha_init(const CmShaInitReq* req, word32 req_len,
 
     (void)req_len;
 
-    memset(resp, 0, sizeof(*resp));
+    XMEMSET(resp, 0, sizeof(*resp));
 
     idx = sim_sha_alloc();
     if (idx < 0) {
@@ -496,7 +495,7 @@ static int sim_handle_sha_update(const CmShaUpdateReq* req, word32 req_len,
 
     (void)req_len;
 
-    memset(resp, 0, sizeof(*resp));
+    XMEMSET(resp, 0, sizeof(*resp));
 
     slot = sim_sha_lookup(req->context);
     if (slot == NULL) {
@@ -530,7 +529,7 @@ static int sim_handle_sha_update(const CmShaUpdateReq* req, word32 req_len,
     }
 
     /* Copy context through (slot index preserved) */
-    memcpy(resp->context, req->context, CMB_SHA_CONTEXT_SIZE);
+    XMEMCPY(resp->context, req->context, CMB_SHA_CONTEXT_SIZE);
     return 0;
 }
 
@@ -548,7 +547,7 @@ static int sim_handle_sha_final(const CmShaFinalReq* req, word32 req_len,
 
     (void)req_len;
 
-    memset(resp, 0, sizeof(*resp));
+    XMEMSET(resp, 0, sizeof(*resp));
 
     slot = sim_sha_lookup(req->context);
     if (slot == NULL) {
@@ -624,7 +623,7 @@ static int sim_handle_random_generate(const CmRandomGenerateReq* req,
     word32 size;
     (void)req_len;
 
-    memset(resp, 0, sizeof(*resp));
+    XMEMSET(resp, 0, sizeof(*resp));
 
     size = LE32TOH(req->size);
     if (size > (word32)CMB_MAX_DATA_SIZE)
@@ -654,7 +653,7 @@ static int sim_handle_aes_enc_init(const CmAesGcmEncryptInitReq* req,
 
     (void)req_len;
 
-    memset(resp, 0, sizeof(*resp));
+    XMEMSET(resp, 0, sizeof(*resp));
 
     key = sim_key_lookup(req->cmk.bytes);
     if (key == NULL) {
@@ -675,7 +674,7 @@ static int sim_handle_aes_enc_init(const CmAesGcmEncryptInitReq* req,
     slot = &sim_aes[idx];
     slot->enc = 1;
 
-    memcpy(slot->raw_key, key->key_data, key->key_len);
+    XMEMCPY(slot->raw_key, key->key_data, key->key_len);
 
     /* Generate random IV */
     if (sim_get_random(iv, 12) != 0) {
@@ -683,7 +682,7 @@ static int sim_handle_aes_enc_init(const CmAesGcmEncryptInitReq* req,
         resp->hdr.fips_status = HTOLE32(0xFF);
         return -1;
     }
-    memcpy(slot->iv, iv, 12);
+    XMEMCPY(slot->iv, iv, 12);
 
     /* Copy AAD; reject (don't silently truncate) oversized AAD so that
      * aad_len always reflects what's actually in slot->aad. */
@@ -694,13 +693,13 @@ static int sim_handle_aes_enc_init(const CmAesGcmEncryptInitReq* req,
         return -1;
     }
     if (slot->aad_len > 0)
-        memcpy(slot->aad, req->aad, slot->aad_len);
+        XMEMCPY(slot->aad, req->aad, slot->aad_len);
 
     /* Write context: slot index + IV */
     sim_aes_ctx_from_index(resp->context, idx, iv);
 
     /* Return IV as u32[3] (raw bytes, same as the 12-byte IV) */
-    memcpy(resp->iv, iv, 12);
+    XMEMCPY(resp->iv, iv, 12);
 
     return 0;
 }
@@ -717,7 +716,7 @@ static int sim_handle_aes_enc_update(const CmAesGcmEncryptUpdateReq* req,
 
     (void)req_len;
 
-    memset(resp, 0, sizeof(*resp));
+    XMEMSET(resp, 0, sizeof(*resp));
 
     slot = sim_aes_lookup(req->context);
     if (slot == NULL) {
@@ -733,13 +732,13 @@ static int sim_handle_aes_enc_update(const CmAesGcmEncryptUpdateReq* req,
             resp->hdr.fips_status = HTOLE32(0xFF);
             return -1;
         }
-        memcpy(slot->data + slot->data_len, req->plaintext, pt_sz);
+        XMEMCPY(slot->data + slot->data_len, req->plaintext, pt_sz);
         slot->data_len += pt_sz;
     }
     }
 
     /* Defer encryption to FINAL; return empty ciphertext */
-    memcpy(resp->context, req->context, CMB_AES_GCM_ENCRYPTED_CTX_SIZE);
+    XMEMCPY(resp->context, req->context, CMB_AES_GCM_ENCRYPTED_CTX_SIZE);
     resp->ciphertext_size = HTOLE32(0);
     return 0;
 }
@@ -761,7 +760,7 @@ static int sim_handle_aes_enc_final(const CmAesGcmEncryptFinalReq* req,
 
     (void)req_len;
 
-    memset(resp, 0, sizeof(*resp));
+    XMEMSET(resp, 0, sizeof(*resp));
 
     slot = sim_aes_lookup(req->context);
     if (slot == NULL) {
@@ -778,7 +777,7 @@ static int sim_handle_aes_enc_final(const CmAesGcmEncryptFinalReq* req,
             resp->hdr.fips_status = HTOLE32(0xFF);
             return -1;
         }
-        memcpy(slot->data + slot->data_len, req->plaintext, pt_sz);
+        XMEMCPY(slot->data + slot->data_len, req->plaintext, pt_sz);
         slot->data_len += pt_sz;
     }
     }
@@ -820,7 +819,7 @@ static int sim_handle_aes_enc_final(const CmAesGcmEncryptFinalReq* req,
     }
 
     /* Write tag as u32[4] (raw bytes) */
-    memcpy(resp->tag, tag, 16);
+    XMEMCPY(resp->tag, tag, 16);
     resp->ciphertext_size = HTOLE32(total_len);
     return 0;
 }
@@ -839,7 +838,7 @@ static int sim_handle_aes_dec_init(const CmAesGcmDecryptInitReq* req,
 
     (void)req_len;
 
-    memset(resp, 0, sizeof(*resp));
+    XMEMSET(resp, 0, sizeof(*resp));
 
     key = sim_key_lookup(req->cmk.bytes);
     if (key == NULL) {
@@ -860,10 +859,10 @@ static int sim_handle_aes_dec_init(const CmAesGcmDecryptInitReq* req,
     slot = &sim_aes[idx];
     slot->enc = 0;
 
-    memcpy(slot->raw_key, key->key_data, key->key_len);
+    XMEMCPY(slot->raw_key, key->key_data, key->key_len);
 
     /* IV supplied by caller as byte[12] stored in iv[3] (u32[3]) */
-    memcpy(slot->iv, req->iv, 12);
+    XMEMCPY(slot->iv, req->iv, 12);
 
     /* Copy AAD; reject (don't silently truncate) oversized AAD so that
      * aad_len always reflects what's actually in slot->aad. */
@@ -874,7 +873,7 @@ static int sim_handle_aes_dec_init(const CmAesGcmDecryptInitReq* req,
         return -1;
     }
     if (slot->aad_len > 0)
-        memcpy(slot->aad, req->aad, slot->aad_len);
+        XMEMCPY(slot->aad, req->aad, slot->aad_len);
 
     sim_aes_ctx_from_index(resp->context, idx, NULL);
     return 0;
@@ -893,7 +892,7 @@ static int sim_handle_aes_dec_update(const CmAesGcmDecryptUpdateReq* req,
 
     (void)req_len;
 
-    memset(resp, 0, sizeof(*resp));
+    XMEMSET(resp, 0, sizeof(*resp));
 
     slot = sim_aes_lookup(req->context);
     if (slot == NULL) {
@@ -922,7 +921,7 @@ static int sim_handle_aes_dec_update(const CmAesGcmDecryptUpdateReq* req,
             resp->hdr.fips_status = HTOLE32(0xFF);
             return -1;
         }
-        memcpy(slot->data + slot->data_len, req->ciphertext, chunk_sz);
+        XMEMCPY(slot->data + slot->data_len, req->ciphertext, chunk_sz);
         slot->data_len += chunk_sz;
 
         /* Recover plaintext via the GCM CTR-mode symmetry: feeding the
@@ -965,10 +964,10 @@ static int sim_handle_aes_dec_update(const CmAesGcmDecryptUpdateReq* req,
 
         /* Return decrypted plaintext for the current chunk */
         resp->plaintext_size = HTOLE32(chunk_sz);
-        memcpy(resp->plaintext, slot->plaintext, chunk_sz);
+        XMEMCPY(resp->plaintext, slot->plaintext, chunk_sz);
     }
 
-    memcpy(resp->context, req->context, CMB_AES_GCM_ENCRYPTED_CTX_SIZE);
+    XMEMCPY(resp->context, req->context, CMB_AES_GCM_ENCRYPTED_CTX_SIZE);
     return 0;
 }
 
@@ -1000,7 +999,7 @@ static int sim_handle_aes_dec_final(const CmAesGcmDecryptFinalReq* req,
 
     (void)req_len;
 
-    memset(resp, 0, sizeof(*resp));
+    XMEMSET(resp, 0, sizeof(*resp));
 
     slot = sim_aes_lookup(req->context);
     if (slot == NULL) {
@@ -1019,13 +1018,13 @@ static int sim_handle_aes_dec_final(const CmAesGcmDecryptFinalReq* req,
             resp->hdr.fips_status = HTOLE32(0xFF);
             return -1;
         }
-        memcpy(slot->data + slot->data_len, req->ciphertext, ct_sz);
+        XMEMCPY(slot->data + slot->data_len, req->ciphertext, ct_sz);
         slot->data_len += ct_sz;
     }
     }
 
     /* Extract the tag the caller wants us to verify */
-    memcpy(tag, req->tag, 16);
+    XMEMCPY(tag, req->tag, 16);
 
     /* Verify the tag by re-encrypting the plaintext we already computed
      * during DECRYPT_UPDATE.  The resulting computed_tag must match tag. */
@@ -1098,7 +1097,7 @@ static int sim_handle_ecdsa_sign(const CmEcdsaSignReq* req, word32 req_len,
 
     (void)req_len;
 
-    memset(resp, 0, sizeof(*resp));
+    XMEMSET(resp, 0, sizeof(*resp));
 
     key = sim_key_lookup(req->cmk.bytes);
     if (key == NULL || key->key_type != SIM_KEY_TYPE_ECC_PRV) {
@@ -1142,8 +1141,8 @@ static int sim_handle_ecdsa_sign(const CmEcdsaSignReq* req, word32 req_len,
     }
 
     /* Decode DER to raw r, s */
-    memset(r, 0, 48);
-    memset(s, 0, 48);
+    XMEMSET(r, 0, 48);
+    XMEMSET(s, 0, 48);
     ret = wc_ecc_sig_to_rs(sig_der, sig_len, r, &rLen, s, &sLen);
     if (ret != 0) {
         resp->hdr.fips_status = HTOLE32(0xFF);
@@ -1153,19 +1152,19 @@ static int sim_handle_ecdsa_sign(const CmEcdsaSignReq* req, word32 req_len,
     /* Zero-pad r and s to 48 bytes (big-endian, left-pad with zeros) */
     if (rLen < 48) {
         byte tmp[48];
-        memset(tmp, 0, 48);
-        memcpy(tmp + (48 - rLen), r, rLen);
-        memcpy(r, tmp, 48);
+        XMEMSET(tmp, 0, 48);
+        XMEMCPY(tmp + (48 - rLen), r, rLen);
+        XMEMCPY(r, tmp, 48);
     }
     if (sLen < 48) {
         byte tmp[48];
-        memset(tmp, 0, 48);
-        memcpy(tmp + (48 - sLen), s, sLen);
-        memcpy(s, tmp, 48);
+        XMEMSET(tmp, 0, 48);
+        XMEMCPY(tmp + (48 - sLen), s, sLen);
+        XMEMCPY(s, tmp, 48);
     }
 
-    memcpy(resp->signature_r, r, 48);
-    memcpy(resp->signature_s, s, 48);
+    XMEMCPY(resp->signature_r, r, 48);
+    XMEMCPY(resp->signature_s, s, 48);
     return 0;
 }
 
@@ -1186,7 +1185,7 @@ static int sim_handle_ecdsa_verify(const CmEcdsaVerifyReq* req, word32 req_len,
 
     (void)req_len;
 
-    memset(resp, 0, sizeof(*resp));
+    XMEMSET(resp, 0, sizeof(*resp));
 
     key = sim_key_lookup(req->cmk.bytes);
     if (key == NULL || key->key_type != SIM_KEY_TYPE_ECC_PUB) {
@@ -1195,8 +1194,8 @@ static int sim_handle_ecdsa_verify(const CmEcdsaVerifyReq* req, word32 req_len,
     }
 
     /* Encode raw r, s to DER */
-    memcpy(r, req->signature_r, 48);
-    memcpy(s, req->signature_s, 48);
+    XMEMCPY(r, req->signature_r, 48);
+    XMEMCPY(s, req->signature_s, 48);
 
     ret = wc_ecc_rs_raw_to_sig(r, 48, s, 48, sig_der, &sig_len);
     if (ret != 0) {
@@ -1272,7 +1271,7 @@ static int sim_handle_hmac(const CmHmacReq* req, word32 req_len,
 
     (void)req_len;
 
-    memset(resp, 0, sizeof(*resp));
+    XMEMSET(resp, 0, sizeof(*resp));
 
     key = sim_key_lookup(req->cmk.bytes);
     if (key == NULL) {
@@ -1332,7 +1331,7 @@ static int sim_mailbox_exec_locked(word32 cmd_id,
                                    void*       resp, word32 resp_len)
 {
     /* MEDIUM-37: reject callers passing a too-small resp buffer for the
-     * command they invoked.  The handlers below memset(resp, 0,
+     * command they invoked.  The handlers below XMEMSET(resp, 0,
      * sizeof(*resp)) and dereference resp as a specific concrete type;
      * an undersized buffer would overflow into adjacent memory.  Real
      * Caliptra firmware reports a Mailbox::IncorrectResponseSize error
@@ -1428,7 +1427,7 @@ static int sim_mailbox_exec_locked(word32 cmd_id,
                                    (CmHmacResp*)resp);
 
         default:
-            fprintf(stderr, "caliptra_sim: unknown cmd_id 0x%08X\n", cmd_id);
+            WOLFSSL_MSG_EX("caliptra_sim: unknown cmd_id 0x%08X", cmd_id);
             return -1;
     }
 }
