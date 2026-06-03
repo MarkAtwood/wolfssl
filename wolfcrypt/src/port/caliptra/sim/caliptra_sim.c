@@ -847,9 +847,9 @@ static int sim_handle_aes_dec_update(const CmAesGcmDecryptUpdateReq* req,
     chunk_sz = LE32TOH(req->ciphertext_size);
 
     if (chunk_sz > 0) {
-        Aes aes;
-        byte fake_tag[16];
-        int ret;
+        Aes  aes;
+        byte throwaway_tag[16];
+        int  ret;
 
         /* Buffer ciphertext for later tag verification at FINAL */
         if (slot->data_len + chunk_sz > (word32)SIM_AES_MAX_DATA) {
@@ -859,39 +859,34 @@ static int sim_handle_aes_dec_update(const CmAesGcmDecryptUpdateReq* req,
         memcpy(slot->data + slot->data_len, req->ciphertext, chunk_sz);
         slot->data_len += chunk_sz;
 
-        /* Decrypt now using a fake all-zeros tag.
-         * wolfSSL writes the plaintext BEFORE checking the tag (default mode),
-         * so we get valid plaintext even though auth will fail.
-         * We verify the real tag at DECRYPT_FINAL time.
+        /* Recover plaintext via the GCM CTR-mode symmetry: feeding the
+         * ciphertext back through wc_AesGcmEncrypt with the same key, IV,
+         * and AAD produces the original plaintext as its output (because
+         * the GCM keystream depends only on key+IV+counter, not on
+         * direction).  The tag this call computes is over the ciphertext-
+         * shaped input, not over the real ciphertext, so we discard it —
+         * the real tag check happens at DECRYPT_FINAL by re-encrypting
+         * the recovered plaintext (unchanged).
          *
-         * FRAGILITY: this relies on wc_AesGcmDecrypt's documented
-         * behaviour of populating the output buffer before tag verification.
-         * If wolfSSL ever changes wc_AesGcmDecrypt to zero the output on
-         * AES_GCM_AUTH_E (e.g., behind a build option for stricter
-         * defense-in-depth), this simulator will start returning all-zero
-         * plaintext for every decrypt — every Caliptra subtest using the
-         * sim would silently fail.  The simulator is host-side testing
-         * infrastructure only; real Caliptra hardware implements
-         * encrypt-then-MAC at the firmware level and does not depend on
-         * this wolfSSL behaviour. */
-        memset(fake_tag, 0, 16);
+         * This replaces an earlier approach that called wc_AesGcmDecrypt
+         * with an all-zero tag and suppressed AES_GCM_AUTH_E, which relied
+         * on the undocumented "output before auth" behaviour of
+         * wc_AesGcmDecrypt.  The encrypt-based path has no such
+         * dependency. */
         ret = wc_AesInit(&aes, NULL, WC_NO_DEVID);
         if (ret == 0)
             ret = wc_AesGcmSetKey(&aes, slot->raw_key, 32);
         if (ret == 0) {
-            /* Decrypt the ENTIRE accumulated ciphertext to get correct plaintext.
-             * (For incremental streaming we'd need partial-block tracking,
-             *  but since the port calls one UPDATE with all data, this works.) */
-            ret = wc_AesGcmDecrypt(&aes,
+            /* "Encrypt" the entire accumulated ciphertext to recover
+             * plaintext.  (The port currently sends all data in one UPDATE,
+             * so this also works for the streaming case.) */
+            ret = wc_AesGcmEncrypt(&aes,
                                    slot->plaintext,
                                    slot->data, slot->data_len,
                                    slot->iv, 12,
-                                   fake_tag, 16,
+                                   throwaway_tag, 16,
                                    slot->aad_len > 0 ? slot->aad : NULL,
                                    slot->aad_len);
-            /* AES_GCM_AUTH_E (-180) expected; plaintext is still valid */
-            if (ret == AES_GCM_AUTH_E)
-                ret = 0;
             if (ret == 0)
                 slot->pt_len = slot->data_len;
         }
