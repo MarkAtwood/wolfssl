@@ -241,6 +241,13 @@ static void sim_sha_free(int idx_0based)
 #define SIM_AES_MAX_AAD     4096
 #define SIM_AES_MAX_DATA   (4096 * 4)
 
+/* The sim's AAD buffer must be at least as large as the wire-format AAD
+ * field (CMB_MAX_DATA_SIZE bytes); otherwise sim_handle_aes_*_init would
+ * have to truncate or reject every maximum-sized AAD the real protocol
+ * permits.  Trips at compile time if either constant drifts. */
+wc_static_assert2(SIM_AES_MAX_AAD >= CMB_MAX_DATA_SIZE,
+                  "sim AAD buffer smaller than wire-format AAD max");
+
 typedef struct {
     int    in_use;
     int    enc;           /* 1=encrypt, 0=decrypt */
@@ -651,9 +658,15 @@ static int sim_handle_aes_enc_init(const CmAesGcmEncryptInitReq* req,
     }
     memcpy(slot->iv, iv, 12);
 
-    /* Copy AAD */
+    /* Copy AAD; reject (don't silently truncate) oversized AAD so that
+     * aad_len always reflects what's actually in slot->aad. */
     slot->aad_len = LE32TOH(req->aad_size);
-    if (slot->aad_len > 0 && slot->aad_len <= (word32)SIM_AES_MAX_AAD)
+    if (slot->aad_len > (word32)SIM_AES_MAX_AAD) {
+        sim_aes_free(idx);
+        resp->hdr.fips_status = HTOLE32(0xFF);
+        return -1;
+    }
+    if (slot->aad_len > 0)
         memcpy(slot->aad, req->aad, slot->aad_len);
 
     /* Write context: slot index + IV */
@@ -745,6 +758,17 @@ static int sim_handle_aes_enc_final(const CmAesGcmEncryptFinalReq* req,
 
     total_len = slot->data_len;
 
+    /* resp->ciphertext is sized for a single mailbox response, not the
+     * full streaming-input cap.  The port always batches a single ENCRYPT
+     * up-front (so total_len fits CMB_MAX_DATA_SIZE), but a misbehaving
+     * direct caller could buffer more than that across multiple UPDATEs.
+     * Reject before the wc_AesGcmEncrypt write overflows resp->ciphertext. */
+    if (total_len > (word32)CMB_MAX_DATA_SIZE) {
+        sim_aes_free(slot_idx);
+        resp->hdr.fips_status = HTOLE32(0xFF);
+        return -1;
+    }
+
     /* Encrypt all buffered data at once */
     ret = wc_AesInit(&aes, NULL, WC_NO_DEVID);
     if (ret == 0) {
@@ -814,9 +838,15 @@ static int sim_handle_aes_dec_init(const CmAesGcmDecryptInitReq* req,
     /* IV supplied by caller as byte[12] stored in iv[3] (u32[3]) */
     memcpy(slot->iv, req->iv, 12);
 
-    /* Copy AAD */
+    /* Copy AAD; reject (don't silently truncate) oversized AAD so that
+     * aad_len always reflects what's actually in slot->aad. */
     slot->aad_len = LE32TOH(req->aad_size);
-    if (slot->aad_len > 0 && slot->aad_len <= (word32)SIM_AES_MAX_AAD)
+    if (slot->aad_len > (word32)SIM_AES_MAX_AAD) {
+        sim_aes_free(idx);
+        resp->hdr.fips_status = HTOLE32(0xFF);
+        return -1;
+    }
+    if (slot->aad_len > 0)
         memcpy(slot->aad, req->aad, slot->aad_len);
 
     sim_aes_ctx_from_index(resp->context, idx, NULL);
@@ -845,6 +875,15 @@ static int sim_handle_aes_dec_update(const CmAesGcmDecryptUpdateReq* req,
     }
 
     chunk_sz = LE32TOH(req->ciphertext_size);
+
+    /* The wire format caps a single UPDATE chunk at CMB_MAX_DATA_SIZE; the
+     * response struct's plaintext field is sized accordingly.  Reject
+     * oversized chunks before they reach the memcpy into resp->plaintext
+     * below, which would otherwise overflow a 4096-byte buffer. */
+    if (chunk_sz > (word32)CMB_MAX_DATA_SIZE) {
+        resp->hdr.fips_status = HTOLE32(0xFF);
+        return -1;
+    }
 
     if (chunk_sz > 0) {
         Aes  aes;
@@ -1264,7 +1303,33 @@ static int sim_mailbox_exec_locked(word32 cmd_id,
                                    const void* req, word32 req_len,
                                    void*       resp, word32 resp_len)
 {
-    (void)resp_len;  /* sim trusts resp buffer is large enough */
+    /* MEDIUM-37: reject callers passing a too-small resp buffer for the
+     * command they invoked.  The handlers below memset(resp, 0,
+     * sizeof(*resp)) and dereference resp as a specific concrete type;
+     * an undersized buffer would overflow into adjacent memory.  Real
+     * Caliptra firmware reports a Mailbox::IncorrectResponseSize error
+     * for this case — returning -1 is the closest sim-side analogue. */
+    word32 expected_resp_sz;
+    switch (cmd_id) {
+        case CM_IMPORT:              expected_resp_sz = sizeof(CmImportResp); break;
+        case CM_DELETE:              expected_resp_sz = sizeof(CmDeleteResp); break;
+        case CM_SHA_INIT:            expected_resp_sz = sizeof(CmShaInitResp); break;
+        case CM_SHA_UPDATE:          expected_resp_sz = sizeof(CmShaUpdateResp); break;
+        case CM_SHA_FINAL:           expected_resp_sz = sizeof(CmShaFinalResp); break;
+        case CM_RANDOM_GENERATE:     expected_resp_sz = sizeof(CmRandomGenerateResp); break;
+        case CM_AES_GCM_ENCRYPT_INIT:    expected_resp_sz = sizeof(CmAesGcmEncryptInitResp); break;
+        case CM_AES_GCM_ENCRYPT_UPDATE:  expected_resp_sz = sizeof(CmAesGcmEncryptUpdateResp); break;
+        case CM_AES_GCM_ENCRYPT_FINAL:   expected_resp_sz = sizeof(CmAesGcmEncryptFinalResp); break;
+        case CM_AES_GCM_DECRYPT_INIT:    expected_resp_sz = sizeof(CmAesGcmDecryptInitResp); break;
+        case CM_AES_GCM_DECRYPT_UPDATE:  expected_resp_sz = sizeof(CmAesGcmDecryptUpdateResp); break;
+        case CM_AES_GCM_DECRYPT_FINAL:   expected_resp_sz = sizeof(CmAesGcmDecryptFinalResp); break;
+        case CM_ECDSA_SIGN:          expected_resp_sz = sizeof(CmEcdsaSignResp); break;
+        case CM_ECDSA_VERIFY:        expected_resp_sz = sizeof(CmEcdsaVerifyResp); break;
+        case CM_HMAC:                expected_resp_sz = sizeof(CmHmacResp); break;
+        default:                     expected_resp_sz = 0; break;  /* unknown cmd; falls through */
+    }
+    if (expected_resp_sz != 0 && resp_len < expected_resp_sz)
+        return -1;
 
     switch (cmd_id) {
         case CM_IMPORT:
