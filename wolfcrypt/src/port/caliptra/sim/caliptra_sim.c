@@ -9,16 +9,19 @@
  * the sim is portable across every platform wolfSSL itself supports rather
  * than relying on /dev/urandom.
  *
- * THREAD SAFETY: this simulator is single-threaded by design.  It holds
- * process-wide mutable state in three static arrays (sim_keys, sim_sha,
- * sim_aes) with no locking.  Concurrent calls to caliptra_mailbox_exec()
- * from multiple threads will race on slot allocation, lookup, and
- * mutation.  Real Caliptra hardware serialises requests via the mailbox
- * lock semaphore (see Caliptra Cryptographic Mailbox spec); integrators
- * that need a multi-threaded test environment should supply their own
- * caliptra_mailbox_exec() implementation that wraps a mutex around the
- * mailbox transaction, or build with --disable-caliptra-sim and link
- * against a real (or differently-implemented) mailbox backend.
+ * THREAD SAFETY: concurrent calls to caliptra_mailbox_exec() are now
+ * serialized by an internal mutex (sim_mailbox_lock), initialised by
+ * wc_caliptra_init() and torn down by wc_caliptra_cleanup().  This matches
+ * the real Caliptra hardware behaviour, which serialises requests via the
+ * mailbox lock semaphore (see Caliptra Cryptographic Mailbox spec), and
+ * makes the sim safe to use under the default multi-threaded wolfSSL
+ * builds.  The mutex itself is initialised idempotently from a non-atomic
+ * flag, so callers MUST invoke wc_caliptra_init() before issuing the
+ * first mailbox operation from any thread (caliptra_test does this); a
+ * race during first-init itself is not defended against.  Integrators
+ * needing a different concurrency model should build with
+ * --disable-caliptra-sim and link against a real (or differently-
+ * implemented) mailbox backend.
  */
 
 #include <wolfssl/wolfcrypt/settings.h>
@@ -32,9 +35,44 @@
 #include <wolfssl/wolfcrypt/error-crypt.h>
 #include <wolfssl/wolfcrypt/cryptocb.h>
 #include <wolfssl/wolfcrypt/misc.h>
+#include <wolfssl/wolfcrypt/wc_port.h>
 
 #include <string.h>
 #include <stdio.h>
+
+/* =========================================================================
+ * Single mailbox-serialization mutex (HIGH-46 mitigation).
+ *
+ * The sim holds process-wide mutable state (sim_keys[], sim_sha[],
+ * sim_aes[]); wrapping every caliptra_mailbox_exec() call in this mutex
+ * makes those statics safe under default multi-threaded wolfSSL builds.
+ * sim_mailbox_lock_init is a plain (non-atomic) flag: first-init must be
+ * driven from a single thread via wc_caliptra_init() before any worker
+ * thread calls caliptra_mailbox_exec().  See file header THREAD SAFETY.
+ * ========================================================================= */
+static wolfSSL_Mutex sim_mailbox_lock;
+static int           sim_mailbox_lock_init = 0;
+
+int  sim_mailbox_lock_init_once(void);
+void sim_mailbox_lock_free_once(void);
+
+int sim_mailbox_lock_init_once(void)
+{
+    if (sim_mailbox_lock_init)
+        return 0;
+    if (wc_InitMutex(&sim_mailbox_lock) != 0)
+        return BAD_MUTEX_E;
+    sim_mailbox_lock_init = 1;
+    return 0;
+}
+
+void sim_mailbox_lock_free_once(void)
+{
+    if (!sim_mailbox_lock_init)
+        return;
+    (void)wc_FreeMutex(&sim_mailbox_lock);
+    sim_mailbox_lock_init = 0;
+}
 
 /* Use INVALID_DEVID for all internal wolfSSL calls to avoid CryptoCb recursion.
  * WC_NO_DEVID is not defined in this wolfSSL build; INVALID_DEVID (-2) has
@@ -890,8 +928,8 @@ static int sim_handle_aes_dec_final(const CmAesGcmDecryptFinalReq* req,
     /* dummy_ct holds the re-encrypted ciphertext used solely as the
      * destination buffer for wc_AesGcmEncrypt during tag verification —
      * its contents are never read.  At SIM_AES_MAX_DATA (16 KB) it is too
-     * large to live on the stack on constrained hosts.  The simulator is
-     * single-threaded by design (see sim_keys/sim_sha/sim_aes statics),
+     * large to live on the stack on constrained hosts.  Concurrent access
+     * is serialised by sim_mailbox_lock (see file header THREAD SAFETY),
      * so a function-local static is safe and cheaper than per-call
      * heap allocation.  Not zero-initialised: any prior contents are
      * always fully overwritten by wc_AesGcmEncrypt below before any
@@ -1218,12 +1256,18 @@ static int sim_handle_hmac(const CmHmacReq* req, word32 req_len,
 }
 
 /* =========================================================================
- * caliptra_mailbox_exec — main dispatch
+ * caliptra_mailbox_exec — main dispatch (mutex-wrapped)
+ *
+ * The public entry point holds sim_mailbox_lock for the duration of the
+ * command so the static slot tables (sim_keys/sim_sha/sim_aes) and the
+ * function-local statics in handlers are accessed by at most one thread
+ * at a time.  The mutex is initialised by wc_caliptra_init() — callers
+ * must invoke that before the first concurrent mailbox operation.
  * ========================================================================= */
 
-int caliptra_mailbox_exec(word32 cmd_id,
-                          const void* req, word32 req_len,
-                          void*       resp, word32 resp_len)
+static int sim_mailbox_exec_locked(word32 cmd_id,
+                                   const void* req, word32 req_len,
+                                   void*       resp, word32 resp_len)
 {
     (void)resp_len;  /* sim trusts resp buffer is large enough */
 
@@ -1299,4 +1343,21 @@ int caliptra_mailbox_exec(word32 cmd_id,
             fprintf(stderr, "caliptra_sim: unknown cmd_id 0x%08X\n", cmd_id);
             return -1;
     }
+}
+
+int caliptra_mailbox_exec(word32 cmd_id,
+                          const void* req, word32 req_len,
+                          void*       resp, word32 resp_len)
+{
+    int ret;
+
+    if (!sim_mailbox_lock_init)
+        return BAD_MUTEX_E;
+    if (wc_LockMutex(&sim_mailbox_lock) != 0)
+        return BAD_MUTEX_E;
+
+    ret = sim_mailbox_exec_locked(cmd_id, req, req_len, resp, resp_len);
+
+    (void)wc_UnLockMutex(&sim_mailbox_lock);
+    return ret;
 }

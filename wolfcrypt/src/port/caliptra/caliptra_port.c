@@ -1399,12 +1399,24 @@ int wc_caliptra_cb(int devId, wc_CryptoInfo* info, void* ctx)
  *   ret = wc_CryptoCb_RegisterDevice(WOLF_CALIPTRA_DEVID, wc_caliptra_cb, NULL);
  * Separating registration from init lets the integrator supply a custom
  * ctx pointer if needed. */
+#ifdef WOLFSSL_CALIPTRA_SIM
+/* Defined in wolfcrypt/src/port/caliptra/sim/caliptra_sim.c.  Idempotent;
+ * not race-safe at first init, so call from a single thread before any
+ * worker thread invokes the mailbox.  See caliptra_sim.c header. */
+extern int  sim_mailbox_lock_init_once(void);
+extern void sim_mailbox_lock_free_once(void);
+#endif
+
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((weak))
 #endif
 int wc_caliptra_init(void)
 {
+#ifdef WOLFSSL_CALIPTRA_SIM
+    return sim_mailbox_lock_init_once();
+#else
     return 0;
+#endif
 }
 
 #if defined(__GNUC__) || defined(__clang__)
@@ -1412,6 +1424,9 @@ __attribute__((weak))
 #endif
 int wc_caliptra_cleanup(void)
 {
+#ifdef WOLFSSL_CALIPTRA_SIM
+    sim_mailbox_lock_free_once();
+#endif
     return 0;
 }
 
