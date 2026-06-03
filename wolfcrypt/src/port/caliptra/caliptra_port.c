@@ -93,7 +93,7 @@ wc_static_assert2(WC_HW_E != CRYPTOCB_UNAVAILABLE,
                   "caliptra_hmac() relies on this for HMAC fallback safety");
 
 #ifndef WOLF_CRYPTO_CB_FREE
-#warning "WOLFSSL_CALIPTRA requires WOLF_CRYPTO_CB_FREE to avoid CaliptraShaCtx leaks; add it to user_settings.h or use --enable-caliptra"
+#error "WOLFSSL_CALIPTRA requires WOLF_CRYPTO_CB_FREE to avoid CaliptraShaCtx leaks; add it to user_settings.h or use --enable-caliptra"
 #endif
 
 /* =========================================================================
