@@ -36,6 +36,13 @@
 #include <wolfssl/wolfcrypt/cryptocb.h>
 #include <wolfssl/wolfcrypt/wc_port.h>
 
+/* The body of this file only contributes to the link when the simulator
+ * backend is selected.  Guard everything past the unconditional include
+ * block so that build systems (e.g., CMake or user_settings.h-driven
+ * tree builds) that compile every .c file unconditionally still get an
+ * empty translation unit when WOLFSSL_CALIPTRA_SIM is not defined. */
+#ifdef WOLFSSL_CALIPTRA_SIM
+
 /* misc.h normally forward-declares ConstantCompare/ForceZero only under
  * NO_INLINE; otherwise the implementations live in wolfcrypt/src/misc.c
  * and callers include that translation unit directly.  Match the pattern
@@ -1448,3 +1455,5 @@ int caliptra_mailbox_exec(word32 cmd_id,
     (void)wc_UnLockMutex(&sim_mailbox_lock);
     return ret;
 }
+
+#endif /* WOLFSSL_CALIPTRA_SIM */
