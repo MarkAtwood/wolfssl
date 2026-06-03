@@ -34,8 +34,18 @@
 #include <wolfssl/wolfcrypt/random.h>
 #include <wolfssl/wolfcrypt/error-crypt.h>
 #include <wolfssl/wolfcrypt/cryptocb.h>
-#include <wolfssl/wolfcrypt/misc.h>
 #include <wolfssl/wolfcrypt/wc_port.h>
+
+/* misc.h normally forward-declares ConstantCompare/ForceZero only under
+ * NO_INLINE; otherwise the implementations live in wolfcrypt/src/misc.c
+ * and callers include that translation unit directly.  Match the pattern
+ * used by src/tls.c and friends so we get the real symbols at link time. */
+#ifdef NO_INLINE
+    #include <wolfssl/wolfcrypt/misc.h>
+#else
+    #define WOLFSSL_MISC_INCLUDED
+    #include <wolfcrypt/src/misc.c>
+#endif
 
 #include <string.h>
 #include <stdio.h>
@@ -300,7 +310,9 @@ static void sim_aes_ctx_from_index(byte ctx[128], int idx_0based, const byte iv[
 
 static void sim_aes_free(int idx_0based)
 {
-    memset(&sim_aes[idx_0based], 0, sizeof(SimAesSlot));
+    /* Slot holds raw_key and recovered plaintext; ForceZero so an
+     * optimising compiler cannot drop the wipe as dead-store. */
+    wc_ForceZero(&sim_aes[idx_0based], sizeof(SimAesSlot));
 }
 
 /* =========================================================================
@@ -392,7 +404,9 @@ static int sim_handle_delete(const CmDeleteReq* req, word32 req_len,
         return -1;
     }
     idx--;  /* convert to 0-based */
-    memset(&sim_keys[idx], 0, sizeof(SimKey));
+    /* SimKey holds raw key material; ForceZero so an optimising compiler
+     * cannot drop the wipe as dead-store. */
+    wc_ForceZero(&sim_keys[idx], sizeof(SimKey));
     return 0;
 }
 
@@ -1043,11 +1057,12 @@ static int sim_handle_aes_dec_final(const CmAesGcmDecryptFinalReq* req,
         return 0;
     }
 
-    /* Compare computed tag with provided tag.
-     * Mirrors real firmware: fips_status=0 in both cases; tag_verified encodes
-     * the result (1=match, 0=mismatch).
+    /* Compare computed tag with provided tag in constant time so that the
+     * sim does not leak the mismatch position via timing.  Mirrors real
+     * firmware: fips_status=0 in both cases; tag_verified encodes the
+     * result (1=match, 0=mismatch).
      * Source: cryptographic_mailbox.rs: resp.tag_verified = (computed==expected) as u32 */
-    resp->tag_verified = HTOLE32((memcmp(computed_tag, tag, 16) == 0) ? 1 : 0);
+    resp->tag_verified = HTOLE32((ConstantCompare(computed_tag, tag, 16) == 0) ? 1 : 0);
 
     return 0;
 }
