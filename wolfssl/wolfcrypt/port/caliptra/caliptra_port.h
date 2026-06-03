@@ -49,7 +49,7 @@
  *
  * wolfSSL device IDs are int; the only reserved value is INVALID_DEVID (-2).
  * In-tree ports use small positive integers (1, 2, 3...) for named hardware;
- * this port uses 0x43414C50 ("CALP" in ASCII, 1128808528 as a signed int) to
+ * this port uses 0x43414C50 ("CALP" in ASCII, 1128352848 as a signed int) to
  * avoid guessing a small integer that might collide with another port.
  *
  * Integrators who need a different value can override before including this
@@ -179,6 +179,18 @@ typedef struct {
  * Three-phase protocol: Init -> zero or more Updates -> Final.
  * The 'context' blob is an opaque server-side cookie passed back
  * on every subsequent call.  No 'cmd' field — see command register.
+ *
+ * Size note: every request struct below embeds at least one
+ * CMB_MAX_DATA_SIZE (4096) byte buffer (input / aad / plaintext /
+ * ciphertext), so sizeof(CmShaUpdateReq) and friends are slightly larger
+ * than 4 KB.  By default the port heap-allocates these via XMALLOC, so
+ * stack usage is bounded.  When WOLFSSL_CALIPTRA_STATIC_BUFFERS is
+ * defined the port instead declares these as stack-local automatics
+ * (search for "WOLFSSL_CALIPTRA_STATIC_BUFFERS" in caliptra_port.c);
+ * in that mode callers must ensure adequate stack — see the
+ * WOLFSSL_CALIPTRA_STATIC_BUFFERS section in README.md for the
+ * per-operation stack-frame estimates and recommended thread stack
+ * sizes.
  */
 
 /* CM_SHA_INIT request. */
