@@ -286,22 +286,30 @@ static void test_aesgcm_roundtrip(void)
 
 static void test_ecdsa_sign_verify(void)
 {
-    WC_RNG rng;
-    ecc_key sign_key, ver_key;
+    WC_RNG      rng;
+    ecc_key     raw_key;             /* software key for material generation */
+    ecc_key     sign_key, ver_key;   /* Caliptra-routed sign and verify keys */
     CaliptraCmk sign_cmk, verify_cmk;
-    byte sig_der[160];
-    word32 sig_len = sizeof(sig_der);
-    byte hash[48];
-    /* Caliptra treats the 48-byte ECDSA CMK input as a seed: it derives the
-     * key pair via ecc384.key_pair(seed).  Importing the *same* seed for both
-     * sign and verify causes the firmware to derive the same (d', Q') on both
-     * sides, making hardware-to-hardware round-trip verification work. */
-    byte seed[48];
-    int verify_res = 0;
-    int ret;
+    byte        sig_der[160];
+    word32      sig_len = sizeof(sig_der);
+    byte        hash[48];
+    byte        priv_bytes[48];
+    word32      priv_len = sizeof(priv_bytes);
+    byte        pub_x[48], pub_y[48];
+    word32      pub_xlen = sizeof(pub_x), pub_ylen = sizeof(pub_y);
+    byte        pub_key[96];         /* Qx || Qy for Caliptra verify import */
+    int         verify_res = 0;
+    int         saved_devId;
+    int         ret;
 
-    memset(hash, 0xAB, 48);
-    memset(sig_der, 0, sizeof(sig_der));
+    memset(hash,       0xAB, sizeof(hash));
+    memset(sig_der,    0,    sizeof(sig_der));
+    memset(priv_bytes, 0,    sizeof(priv_bytes));
+    memset(pub_x,      0,    sizeof(pub_x));
+    memset(pub_y,      0,    sizeof(pub_y));
+    memset(pub_key,    0,    sizeof(pub_key));
+    memset(&sign_cmk,   0,   sizeof(sign_cmk));
+    memset(&verify_cmk, 0,   sizeof(verify_cmk));
 
     ret = wc_InitRng(&rng);
     if (ret != 0) {
@@ -309,65 +317,91 @@ static void test_ecdsa_sign_verify(void)
         return;
     }
 
-    /* Random seed: both sign_cmk and verify_cmk will hold this value */
-    ret = wc_RNG_GenerateBlock(&rng, seed, sizeof(seed));
+    /* Generate a P-384 keypair in software to obtain priv/pub material. */
+    wc_ecc_init_ex(&raw_key, NULL, INVALID_DEVID);
+    ret = wc_ecc_make_key_ex(&rng, 48, &raw_key, ECC_SECP384R1);
+    if (ret == 0)
+        ret = wc_ecc_export_private_only(&raw_key, priv_bytes, &priv_len);
+    if (ret == 0)
+        ret = wc_ecc_export_public_raw(&raw_key,
+                                       pub_x, &pub_xlen,
+                                       pub_y, &pub_ylen);
+    wc_ecc_free(&raw_key);
     if (ret != 0) {
+        wc_ForceZero(priv_bytes, sizeof(priv_bytes));
         wc_FreeRng(&rng);
         TEST("Caliptra ECDSA sign+verify", 0);
         return;
     }
 
-    /* Import seed as sign CMK */
-    ret = wc_caliptra_import_key(seed, 48, CMB_KEY_USAGE_ECDSA, &sign_cmk);
+    /* Import priv as ECDSA sign CMK (sim treats <=48 bytes as private scalar). */
+    ret = wc_caliptra_import_key(priv_bytes, priv_len,
+                                 CMB_KEY_USAGE_ECDSA, &sign_cmk);
     if (ret != 0) {
+        wc_ForceZero(priv_bytes, sizeof(priv_bytes));
         wc_FreeRng(&rng);
         TEST("Caliptra ECDSA sign+verify", 0);
         return;
     }
 
-    /* Import the same seed as verify CMK — firmware re-derives the same Q' */
-    ret = wc_caliptra_import_key(seed, 48, CMB_KEY_USAGE_ECDSA, &verify_cmk);
+    /* Import Qx||Qy (96 bytes) as ECDSA verify CMK. */
+    memcpy(pub_key,      pub_x, 48);
+    memcpy(pub_key + 48, pub_y, 48);
+    ret = wc_caliptra_import_key(pub_key, sizeof(pub_key),
+                                 CMB_KEY_USAGE_ECDSA, &verify_cmk);
     if (ret != 0) {
         wc_caliptra_delete_key(&sign_cmk);
+        wc_ForceZero(priv_bytes, sizeof(priv_bytes));
         wc_FreeRng(&rng);
         TEST("Caliptra ECDSA sign+verify", 0);
         return;
     }
 
-    /* Sign via Caliptra: wc_ecc_sign_hash requires the key's curve to be
-     * initialised before it routes through the CryptoCb path.  Generate a
-     * throwaway P-384 key to populate the curve metadata, then override
-     * devCtx with sign_cmk so the actual signing uses the Caliptra CMK. */
+    /* Sign via Caliptra.  Use wc_ecc_init_ex + wc_ecc_import_unsigned with
+     * devId temporarily INVALID_DEVID so the import does not route through
+     * CryptoCb (which has no callback for "import an unsigned key").  After
+     * import, restore devId and set devCtx so wc_ecc_sign_hash dispatches
+     * through caliptra_ecdsa_sign().  This is the same idiom as
+     * wolfcrypt/test/test.c caliptra_test() Test 6. */
     wc_ecc_init_ex(&sign_key, NULL, WOLF_CALIPTRA_DEVID);
-    ret = wc_ecc_make_key_ex(&rng, 48, &sign_key, ECC_SECP384R1);
+    saved_devId    = sign_key.devId;
+    sign_key.devId = INVALID_DEVID;
+    ret = wc_ecc_import_unsigned(&sign_key, pub_x, pub_y,
+                                 priv_bytes, ECC_SECP384R1);
+    sign_key.devId = saved_devId;
     if (ret == 0) {
         sign_key.devCtx = &sign_cmk;
-        sign_key.devId  = WOLF_CALIPTRA_DEVID;
-        ret = wc_ecc_sign_hash(hash, 48, sig_der, &sig_len, &rng, &sign_key);
+        ret = wc_ecc_sign_hash(hash, sizeof(hash),
+                               sig_der, &sig_len, &rng, &sign_key);
     }
     wc_ecc_free(&sign_key);
 
     if (ret != 0) {
         wc_caliptra_delete_key(&sign_cmk);
         wc_caliptra_delete_key(&verify_cmk);
+        wc_ForceZero(priv_bytes, sizeof(priv_bytes));
         wc_FreeRng(&rng);
         TEST("Caliptra ECDSA sign+verify", 0);
         return;
     }
 
-    /* Verify via Caliptra: same seed → same Q' → signature checks out.
-     * Same curve-init trick: make a throwaway key, override devCtx. */
+    /* Verify via Caliptra.  Same import-with-temporary-devId pattern; verify
+     * does not need the private scalar. */
     wc_ecc_init_ex(&ver_key, NULL, WOLF_CALIPTRA_DEVID);
-    ret = wc_ecc_make_key_ex(&rng, 48, &ver_key, ECC_SECP384R1);
+    saved_devId   = ver_key.devId;
+    ver_key.devId = INVALID_DEVID;
+    ret = wc_ecc_import_unsigned(&ver_key, pub_x, pub_y, NULL, ECC_SECP384R1);
+    ver_key.devId = saved_devId;
     if (ret == 0) {
         ver_key.devCtx = &verify_cmk;
-        ver_key.devId  = WOLF_CALIPTRA_DEVID;
-        ret = wc_ecc_verify_hash(sig_der, sig_len, hash, 48, &verify_res, &ver_key);
+        ret = wc_ecc_verify_hash(sig_der, sig_len, hash, sizeof(hash),
+                                 &verify_res, &ver_key);
     }
     wc_ecc_free(&ver_key);
 
     wc_caliptra_delete_key(&sign_cmk);
     wc_caliptra_delete_key(&verify_cmk);
+    wc_ForceZero(priv_bytes, sizeof(priv_bytes));
     wc_FreeRng(&rng);
 
     TEST("Caliptra ECDSA sign+verify", ret == 0 && verify_res == 1);
