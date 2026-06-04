@@ -13,6 +13,16 @@ import uuid
 from datetime import datetime, timezone
 
 
+# Tool identification.  Bump GEN_SBOM_VERSION whenever the SBOM output
+# shape changes in any auditor-visible way (new property, new field,
+# semantic change to an existing one) so downstream consumers can pin
+# their parser against a known producer.  Carried in the CycloneDX
+# `metadata.tools.components[].version` and SPDX `creationInfo.creators`
+# fields.  Reproducibility CI keys on byte-equal SBOMs across re-runs,
+# so this constant must change in lockstep with the output it produces.
+GEN_SBOM_TOOL_NAME = 'wolfssl-sbom-gen'
+GEN_SBOM_VERSION = '1.1'
+
 # Stable namespace for deterministic uuid5 derivation.  The seed string is
 # an opaque input to uuid5 -- it only needs to be (a) constant across
 # releases so the derived UUIDs reproduce byte-for-byte (any consumer
@@ -81,7 +91,9 @@ DEP_META = {
         'license': 'Zlib',
         'download': 'https://github.com/madler/zlib',
         'pkgconfig': 'zlib',
-        'purl': lambda v: f'pkg:generic/zlib@{v}',
+        # pkg:github resolves in OSV / GHSA / Snyk / Trivy without the
+        # vendor:product mapping a pkg:generic PURL would force.
+        'purl': lambda v: f'pkg:github/madler/zlib@{v}',
     },
 }
 
@@ -224,6 +236,26 @@ def sha256_file(path):
     except OSError as e:
         sys.exit(f"ERROR: cannot read library for hashing: {e}")
     return h.hexdigest()
+
+
+def sha1_sha256_file(path):
+    """Return (sha1_hex, sha256_hex) computed in a single pass.
+    SPDX 2.3 §8.4 requires SHA-1 on every file entry (`packageFileChecksum`
+    cardinality 1..*, with SHA-1 mandatory).  CycloneDX accepts either.
+    Reading the file twice would double the I/O on builds with many
+    source files; one pass keeps `make sbom` fast on embedded trees."""
+    s1 = hashlib.sha1()
+    s256 = hashlib.sha256()
+    try:
+        with open(path, 'rb') as f:
+            for chunk in iter(lambda: f.read(65536), b''):
+                s1.update(chunk)
+                s256.update(chunk)
+    except OSError as e:
+        sys.exit(f"ERROR: cannot read file for hashing: {e}")
+    return s1.hexdigest(), s256.hexdigest()
+
+
 
 
 def pkgconfig_version(pkgname):
@@ -642,7 +674,7 @@ def spdx_dep_package(key, dep_version_overrides=None):
 def generate_cdx(name, version, supplier, license_id, license_text, lib_hash,
                  timestamp, year, serial, enabled_deps, build_props,
                  dep_version_overrides=None, hash_kind='library-binary',
-                 srcs_basenames=None):
+                 srcs_basenames=None, file_entries=None):
     bom_ref = derived_uuid(name, version, 'package')
 
     dep_bom_refs = []
@@ -656,20 +688,62 @@ def generate_cdx(name, version, supplier, license_id, license_text, lib_hash,
         {'name': f'wolfssl:build:{k}', 'value': v if v else '1'}
         for k, v in build_props
     ]
-    # Document what the SHA-256 in `hashes` represents, but only for
-    # the source-merkle entry point.  The autotools / library-binary
-    # path keeps its existing output shape byte-identical so CI's
-    # reproducibility diff does not regress.  Auditors looking at a
-    # source-merkle SBOM need this annotation to interpret the
-    # checksum correctly (vs. a library-artefact checksum).
-    if hash_kind != 'library-binary':
-        properties.append(
-            {'name': 'wolfssl:sbom:hash-kind', 'value': hash_kind})
-        if srcs_basenames:
-            properties.append({
-                'name': 'wolfssl:sbom:source-set',
-                'value': ','.join(srcs_basenames),
-            })
+    # Document what the SHA-256 in `hashes` represents, on every entry
+    # point.  Without this property an auditor reading the SBOM has to
+    # guess whether the SHA-256 is over a library binary, a source-set
+    # Merkle hash, or something else.  Emitting it unconditionally
+    # turns "what does this hash mean?" from forensic guesswork into
+    # a single property lookup.
+    properties.append(
+        {'name': 'wolfssl:sbom:hash-kind', 'value': hash_kind})
+    if srcs_basenames:
+        properties.append({
+            'name': 'wolfssl:sbom:source-set',
+            'value': ','.join(srcs_basenames),
+        })
+
+    main_component = {
+        'bom-ref': bom_ref,
+        'type': 'library',
+        'supplier': {'name': supplier},
+        'name': name,
+        'version': version,
+        'licenses': cdx_license_block(license_id, license_text),
+        'copyright': f'Copyright (C) 2006-{year} wolfSSL Inc.',
+        'cpe': f'cpe:2.3:a:wolfssl:{name}:{version}:*:*:*:*:*:*:*',
+        'purl': f'pkg:github/wolfSSL/{name}@v{version}',
+        'hashes': [{'alg': 'SHA-256', 'content': lib_hash}],
+        'externalReferences': [
+            {'type': 'vcs',
+             'url': 'https://github.com/wolfSSL/wolfssl'},
+            {'type': 'website',
+             'url': 'https://www.wolfssl.com/'},
+            {'type': 'issue-tracker',
+             'url': 'https://github.com/wolfSSL/wolfssl/issues'},
+            {'type': 'advisories',
+             'url': 'https://github.com/wolfSSL/wolfssl/security/advisories'},
+            {'type': 'security-contact',
+             'url': 'https://www.wolfssl.com/.well-known/security.txt'},
+        ],
+        'properties': properties,
+    }
+    # Sub-component file entries (CycloneDX file-typed components nested
+    # under the library).  Autotools paths nest the linked library
+    # binary so an auditor running a CDX parser can resolve the SHA-256
+    # in `hashes` back to a concrete file path; embedded paths skip
+    # this since the source-set Merkle hash already captures the inputs.
+    if file_entries:
+        main_component['components'] = [
+            {
+                'type': 'file',
+                'name': fe['name'],
+                'hashes': [
+                    {'alg': 'SHA-1', 'content': fe['sha1']},
+                    {'alg': 'SHA-256', 'content': fe['sha256']},
+                ],
+            }
+            for fe in file_entries
+        ]
 
     return {
         '$schema': 'http://cyclonedx.org/schema/bom-1.6.schema.json',
@@ -683,27 +757,11 @@ def generate_cdx(name, version, supplier, license_id, license_text, lib_hash,
                 'components': [{
                     'type': 'application',
                     'author': 'wolfSSL Inc.',
-                    'name': 'wolfssl-sbom-gen',
-                    'version': '1.0'
+                    'name': GEN_SBOM_TOOL_NAME,
+                    'version': GEN_SBOM_VERSION,
                 }]
             },
-            'component': {
-                'bom-ref': bom_ref,
-                'type': 'library',
-                'supplier': {'name': supplier},
-                'name': name,
-                'version': version,
-                'licenses': cdx_license_block(license_id, license_text),
-                'copyright': f'Copyright (C) 2006-{year} wolfSSL Inc.',
-                'cpe': f'cpe:2.3:a:wolfssl:{name}:{version}:*:*:*:*:*:*:*',
-                'purl': f'pkg:generic/{name}@{version}',
-                'hashes': [{'alg': 'SHA-256', 'content': lib_hash}],
-                'externalReferences': [{
-                    'type': 'vcs',
-                    'url': 'https://github.com/wolfSSL/wolfssl'
-                }],
-                'properties': properties,
-            }
+            'component': main_component,
         },
         'components': components,
         'dependencies': [
@@ -716,17 +774,35 @@ def generate_cdx(name, version, supplier, license_id, license_text, lib_hash,
 def generate_spdx(name, version, supplier, license_id, license_text, lib_hash,
                   timestamp, year, doc_ns_uuid, enabled_deps, build_props,
                   dep_version_overrides=None, hash_kind='library-binary',
-                  srcs_basenames=None, document_namespace=None):
+                  srcs_basenames=None, document_namespace=None,
+                  file_entries=None):
     build_defines = ', '.join(k for k, _ in build_props)
-    # Only annotate the comment when running the source-merkle entry
-    # point.  The autotools / library-binary path keeps its existing
-    # output shape byte-identical so reproducibility CI does not
-    # regress.
-    if hash_kind != 'library-binary':
-        build_defines += f' | hash-kind={hash_kind}'
-        if srcs_basenames:
-            build_defines += (
-                ' | source-set=' + ','.join(srcs_basenames))
+    # Hash-kind / source-set / bomsh-traced-binary information used to
+    # be stuffed into the package `comment` as `key=value` slugs, which
+    # forced anyone reading the SPDX to grep free-form text.  SPDX 2.3
+    # §8.5 provides `annotations[]` for exactly this -- structured
+    # producer notes that validators understand and downstream parsers
+    # can consume directly.  The `comment` field now carries only the
+    # build-config define list a human reader scans first.
+
+    # Annotations on the wolfssl package: structured producer notes
+    # that the comment field used to carry as positional `key=value`
+    # slugs.  Covered by the SPDX 2.3 §8.5 schema, so validators see
+    # them as first-class data instead of opaque text.
+    annotations = []
+
+    def _annotate(payload):
+        annotations.append({
+            'annotationDate': timestamp,
+            'annotationType': 'OTHER',
+            'annotator': f'Tool: {GEN_SBOM_TOOL_NAME}-{GEN_SBOM_VERSION}',
+            'comment': payload,
+        })
+
+    _annotate(f'wolfssl:sbom:hash-kind={hash_kind}')
+    if srcs_basenames:
+        _annotate('wolfssl:sbom:source-set=' + ','.join(srcs_basenames))
+
     wolfssl_pkg = {
         'SPDXID': 'SPDXRef-Package-wolfssl',
         'name': name,
@@ -739,6 +815,7 @@ def generate_spdx(name, version, supplier, license_id, license_text, lib_hash,
         'licenseDeclared': license_id,
         'copyrightText': f'Copyright (C) 2006-{year} wolfSSL Inc.',
         'comment': f'Build configuration defines: {build_defines}',
+        'annotations': annotations,
         'externalRefs': [
             {
                 'referenceCategory': 'SECURITY',
@@ -750,10 +827,35 @@ def generate_spdx(name, version, supplier, license_id, license_text, lib_hash,
             {
                 'referenceCategory': 'PACKAGE-MANAGER',
                 'referenceType': 'purl',
-                'referenceLocator': f'pkg:generic/{name}@{version}'
-            }
+                'referenceLocator': f'pkg:github/wolfSSL/{name}@v{version}',
+            },
+            {
+                'referenceCategory': 'SECURITY',
+                'referenceType': 'advisory',
+                'referenceLocator': (
+                    'https://github.com/wolfSSL/wolfssl/security/advisories'
+                ),
+            },
         ],
     }
+
+    # No SPDX `files[]` / `hasFiles[]` inventory.  spdx-tools (the
+    # validator the autotools `make sbom` recipe runs) treats any
+    # `hasFiles` linkage as an implicit CONTAINS relationship, and
+    # SPDX 2.3 forbids package elements when `filesAnalyzed` is False.
+    # Flipping `filesAnalyzed` to True is not honest for wolfSSL: the
+    # package contains hundreds of source/header files, of which we
+    # only enumerate the linked binary, and `packageVerificationCode`
+    # under §8.10 requires every file in the package to be hashed.
+    # The CycloneDX side (which is more permissive about file
+    # sub-components) carries the linked-binary inventory; the SPDX
+    # side relies on the package-level SHA-256 plus the
+    # `wolfssl:sbom:hash-kind` annotation to identify the artefact.
+    # `file_entries` is accepted for parameter symmetry with
+    # generate_cdx but ignored here; if a future SPDX 2.4 / 3.0 model
+    # makes file inventory cleanly compatible with `filesAnalyzed:
+    # False`, this is the place to add it back.
+    del file_entries  # unused on the SPDX side; see comment above.
 
     packages = [wolfssl_pkg]
     relationships = [{
@@ -788,7 +890,7 @@ def generate_spdx(name, version, supplier, license_id, license_text, lib_hash,
         'creationInfo': {
             'creators': [
                 f'Organization: {supplier}',
-                'Tool: wolfssl-sbom-gen-1.0'
+                f'Tool: {GEN_SBOM_TOOL_NAME}-{GEN_SBOM_VERSION}',
             ],
             'created': timestamp,
         },
@@ -990,6 +1092,7 @@ def main():
             args.user_settings_define,
         )
 
+    file_entries = None
     if args.lib:
         # Refuse the empty-file SHA-256 as a component checksum.  A
         # build that points --lib at /dev/null, a stub touch(1)'d
@@ -1007,9 +1110,20 @@ def main():
                 "to emit an SBOM with the empty-file SHA-256 as the "
                 "component checksum.  Verify your build produced a "
                 "real library artefact.")
-        lib_hash = sha256_file(args.lib)
+        lib_sha1, lib_hash = sha1_sha256_file(args.lib)
         hash_kind = 'library-binary'
         srcs_basenames = None
+        # Single SPDX file entry / CycloneDX file sub-component for
+        # the linked library, so the SBOM names the artefact whose
+        # SHA-256 it is reporting (rather than only carrying the hash
+        # in `checksums[]`).  Auditors and downstream tooling can
+        # then cross-reference the binary by its canonical filename
+        # without out-of-band knowledge of the build layout.
+        file_entries = [{
+            'name': os.path.basename(args.lib),
+            'sha1': lib_sha1,
+            'sha256': lib_hash,
+        }]
     else:
         # --srcs is the embedded entry point.  Zero-byte files in the
         # set are uncommon but not necessarily wrong (a cross-compile
@@ -1040,6 +1154,7 @@ def main():
         enabled_deps, build_props,
         dep_version_overrides=dep_version_overrides,
         hash_kind=hash_kind, srcs_basenames=srcs_basenames,
+        file_entries=file_entries,
     )
     spdx = generate_spdx(
         args.name, args.version, args.supplier,
@@ -1048,6 +1163,7 @@ def main():
         dep_version_overrides=dep_version_overrides,
         hash_kind=hash_kind, srcs_basenames=srcs_basenames,
         document_namespace=(args.document_namespace or None),
+        file_entries=file_entries,
     )
 
     try:

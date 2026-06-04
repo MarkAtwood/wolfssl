@@ -155,7 +155,7 @@ under which your distribution mirrors `wolfssl-<version>.cdx.json`.
   "type": "library",
   "name": "wolfssl",
   "version": "<version>",
-  "purl": "pkg:generic/wolfssl@<version>",
+  "purl": "pkg:github/wolfSSL/wolfssl@v<version>",
   "cpe": "cpe:2.3:a:wolfssl:wolfssl:<version>:*:*:*:*:*:*:*",
   "licenses": [{ "license": { "id": "GPL-3.0-only" } }],
   "externalReferences": [

@@ -1621,7 +1621,11 @@ class TestGenerateCdx(unittest.TestCase):
         self.assertEqual(
             comp['cpe'],
             'cpe:2.3:a:wolfssl:wolfssl:5.9.1:*:*:*:*:*:*:*')
-        self.assertEqual(comp['purl'], 'pkg:generic/wolfssl@5.9.1')
+        # pkg:github resolves to OSV / GHSA / Snyk / Trivy directly,
+        # without the vendor:product mapping a pkg:generic PURL would
+        # force.  pkg:github tag refs use the upstream `vX.Y.Z` shape
+        # (rather than bare `X.Y.Z`), matching wolfSSL's release tags.
+        self.assertEqual(comp['purl'], 'pkg:github/wolfSSL/wolfssl@v5.9.1')
         self.assertEqual(comp['hashes'],
                          [{'alg': 'SHA-256', 'content': 'a' * 64}])
         self.assertEqual(comp['licenses'],
@@ -1683,18 +1687,71 @@ class TestGenerateCdx(unittest.TestCase):
                          'source-merkle-omnibor')
         self.assertEqual(props['wolfssl:sbom:source-set'], 'aes.c,sha.c')
 
-    def test_library_binary_path_omits_hash_kind_property(self):
-        # Reproducibility CI keys on byte-equal SBOMs across two runs
-        # of `make sbom` with the same SOURCE_DATE_EPOCH; adding the
-        # hash-kind annotation to the library-binary path would break
-        # that diff.  Pin the empty-set behaviour.
+    def test_library_binary_path_emits_hash_kind_property(self):
+        # The library-binary path now also emits hash-kind: it is the
+        # auditor's only structured signal for what the SHA-256 in
+        # `hashes` actually represents.  Previously this property was
+        # only set on the source-merkle path, leaving an autotools
+        # SBOM ambiguous about its checksum semantics.
         doc = gs.generate_cdx(**self.BASE_KW)
-        prop_names = {
-            p['name']
-            for p in doc['metadata']['component']['properties']
-        }
-        self.assertNotIn('wolfssl:sbom:hash-kind', prop_names)
-        self.assertNotIn('wolfssl:sbom:source-set', prop_names)
+        props = {p['name']: p['value']
+                 for p in doc['metadata']['component']['properties']}
+        self.assertEqual(props['wolfssl:sbom:hash-kind'], 'library-binary')
+        # source-set is only meaningful for the merkle path.
+        self.assertNotIn('wolfssl:sbom:source-set', props)
+
+    def test_main_component_carries_security_external_refs(self):
+        # An auditor reading the CDX needs a single in-document link
+        # to the project's security advisories and the RFC 9116
+        # security.txt; previously they had to know to go look on
+        # GitHub or wolfssl.com.  Pin the set so a regression that
+        # drops one of these silently is caught at the cheap CI gate.
+        doc = gs.generate_cdx(**self.BASE_KW)
+        refs = doc['metadata']['component']['externalReferences']
+        types = {r['type'] for r in refs}
+        self.assertEqual(
+            {'vcs', 'website', 'issue-tracker', 'advisories',
+             'security-contact'},
+            types)
+        sec_url = next(
+            r['url'] for r in refs if r['type'] == 'security-contact')
+        self.assertEqual(
+            sec_url,
+            'https://www.wolfssl.com/.well-known/security.txt')
+
+    def test_lib_file_entries_become_subcomponents(self):
+        # CycloneDX 1.6 lets a library component nest file-typed
+        # sub-components.  When the autotools `--lib` path supplies a
+        # file_entries list, the SBOM names the linked binary by file
+        # path + SHA-1 + SHA-256 so an auditor / scanner does not have
+        # to reason about the bare SHA-256 in `hashes` against a
+        # build-system layout they cannot see.
+        doc = gs.generate_cdx(**{
+            **self.BASE_KW,
+            'file_entries': [{
+                'name': 'libwolfssl.so.43.0.0',
+                'sha1': 'b' * 40,
+                'sha256': 'a' * 64,
+            }],
+        })
+        sub = doc['metadata']['component']['components']
+        self.assertEqual(len(sub), 1)
+        self.assertEqual(sub[0]['type'], 'file')
+        self.assertEqual(sub[0]['name'], 'libwolfssl.so.43.0.0')
+        algs = {h['alg'] for h in sub[0]['hashes']}
+        self.assertEqual(algs, {'SHA-1', 'SHA-256'})
+
+    def test_tool_metadata_uses_module_constants(self):
+        # The CDX `metadata.tools.components[]` entry is the only
+        # producer-identity field in the document; downstream consumers
+        # pin their parser against the (name, version) pair, so the
+        # tool name / version must come from the module-level
+        # constants and not from a stale string baked into the
+        # generator.
+        doc = gs.generate_cdx(**self.BASE_KW)
+        tool = doc['metadata']['tools']['components'][0]
+        self.assertEqual(tool['name'], gs.GEN_SBOM_TOOL_NAME)
+        self.assertEqual(tool['version'], gs.GEN_SBOM_VERSION)
 
 
 class TestGenerateSpdx(unittest.TestCase):
@@ -1837,13 +1894,14 @@ class TestGenerateSpdx(unittest.TestCase):
         doc = gs.generate_spdx(**self.BASE_KW)
         self.assertNotIn('hasExtractedLicensingInfos', doc)
 
-    def test_source_merkle_path_annotates_comment(self):
+    def test_source_merkle_path_annotates_via_annotations(self):
         # Mirror of TestGenerateCdx.test_source_merkle_path_emits_hash_kind_property
-        # for SPDX: the annotation lives in the package 'comment'
-        # field rather than as a property, but the auditor-facing
-        # information is the same.  Reproducibility CI must continue
-        # to see the library-binary path emit the same comment shape
-        # it always has.
+        # for SPDX.  The hash-kind / source-set used to be stuffed into
+        # the package `comment` field as positional `key=value` slugs,
+        # forcing anyone reading the SPDX to grep free-form text.
+        # SPDX 2.3 §8.5 provides `annotations[]` for exactly this
+        # producer metadata, and validators (pyspdxtools, NTIA) treat
+        # them as first-class data.
         doc = gs.generate_spdx(**{
             **self.BASE_KW,
             'hash_kind': 'source-merkle-omnibor',
@@ -1852,17 +1910,141 @@ class TestGenerateSpdx(unittest.TestCase):
         wolfssl_pkg = next(
             p for p in doc['packages']
             if p['SPDXID'] == 'SPDXRef-Package-wolfssl')
-        self.assertIn('hash-kind=source-merkle-omnibor',
-                      wolfssl_pkg['comment'])
-        self.assertIn('source-set=aes.c,sha.c', wolfssl_pkg['comment'])
+        annotation_comments = [
+            a['comment'] for a in wolfssl_pkg['annotations']
+        ]
+        self.assertIn(
+            'wolfssl:sbom:hash-kind=source-merkle-omnibor',
+            annotation_comments)
+        self.assertIn(
+            'wolfssl:sbom:source-set=aes.c,sha.c', annotation_comments)
+        # `comment` no longer carries the structured hash-kind data --
+        # it is reserved for the human-readable build-config defines.
+        self.assertNotIn('hash-kind=', wolfssl_pkg['comment'])
+        self.assertNotIn('source-set=', wolfssl_pkg['comment'])
 
-    def test_library_binary_path_comment_unannotated(self):
+    def test_library_binary_path_annotates_via_annotations(self):
+        # Companion to the source-merkle test: library-binary also
+        # emits hash-kind via annotations[].  The old behaviour of
+        # only annotating the merkle path left autotools SBOMs with
+        # no machine-readable signal of their checksum semantics.
         doc = gs.generate_spdx(**self.BASE_KW)
         wolfssl_pkg = next(
             p for p in doc['packages']
             if p['SPDXID'] == 'SPDXRef-Package-wolfssl')
+        annotation_comments = [
+            a['comment'] for a in wolfssl_pkg['annotations']
+        ]
+        self.assertIn(
+            'wolfssl:sbom:hash-kind=library-binary', annotation_comments)
+        # No source-set on library-binary path.
+        self.assertNotIn('wolfssl:sbom:source-set=',
+                         ''.join(annotation_comments))
+        # Comment is still build-config defines only.
         self.assertNotIn('hash-kind=', wolfssl_pkg['comment'])
-        self.assertNotIn('source-set=', wolfssl_pkg['comment'])
+
+    def test_file_entries_do_not_leak_into_spdx(self):
+        # SPDX 2.3 forbids package elements (CONTAINS relationships
+        # via hasFiles) when `filesAnalyzed: False`, and flipping
+        # `filesAnalyzed: True` would force a packageVerificationCode
+        # that hashes every file in the package -- not just the
+        # linked binary.  generate_spdx accepts file_entries for
+        # parameter symmetry with generate_cdx but must not surface
+        # it as `files[]` / `hasFiles[]`; otherwise pyspdxtools rejects
+        # the document and `make sbom` fails.  Pin the absence so a
+        # future change cannot quietly reintroduce the validator
+        # failure that motivated the carve-out.
+        doc = gs.generate_spdx(**{
+            **self.BASE_KW,
+            'file_entries': [{
+                'name': 'libwolfssl.so.43.0.0',
+                'sha1': 'b' * 40,
+                'sha256': 'a' * 64,
+            }],
+        })
+        self.assertNotIn('files', doc)
+        wolfssl_pkg = next(
+            p for p in doc['packages']
+            if p['SPDXID'] == 'SPDXRef-Package-wolfssl')
+        self.assertNotIn('hasFiles', wolfssl_pkg)
+        self.assertEqual(wolfssl_pkg['filesAnalyzed'], False)
+        self.assertNotIn('packageVerificationCode', wolfssl_pkg)
+        # CONTAINS relationships are also forbidden under
+        # filesAnalyzed=False; ensure none leaked through.
+        contains = [
+            r for r in doc['relationships']
+            if r.get('relationshipType') == 'CONTAINS'
+        ]
+        self.assertEqual(contains, [])
+
+    def test_main_package_purl_uses_pkg_github(self):
+        # PURL parity with the CDX side: pkg:github/<owner>/<repo>@v<v>
+        # resolves directly in OSV / GHSA / Snyk / Trivy.  The previous
+        # pkg:generic shape forced every scanner into CPE-fallback
+        # matching, producing the noisy SBOM behaviour auditors
+        # complain about.
+        doc = gs.generate_spdx(**self.BASE_KW)
+        wolfssl_pkg = next(
+            p for p in doc['packages']
+            if p['SPDXID'] == 'SPDXRef-Package-wolfssl')
+        purl_refs = [
+            r for r in wolfssl_pkg['externalRefs']
+            if r['referenceType'] == 'purl'
+        ]
+        self.assertEqual(len(purl_refs), 1)
+        self.assertEqual(
+            purl_refs[0]['referenceLocator'],
+            'pkg:github/wolfSSL/wolfssl@v5.9.1')
+
+    def test_main_package_carries_advisory_external_ref(self):
+        # SPDX 2.3 SECURITY/advisory externalRef pointing at the
+        # GitHub advisories index.  Same auditor-facing rationale as
+        # the CDX side: a single in-document link to the project's
+        # security disclosures, no out-of-band knowledge required.
+        doc = gs.generate_spdx(**self.BASE_KW)
+        wolfssl_pkg = next(
+            p for p in doc['packages']
+            if p['SPDXID'] == 'SPDXRef-Package-wolfssl')
+        adv_refs = [
+            r for r in wolfssl_pkg['externalRefs']
+            if r['referenceType'] == 'advisory'
+        ]
+        self.assertEqual(len(adv_refs), 1)
+        self.assertEqual(
+            adv_refs[0]['referenceLocator'],
+            'https://github.com/wolfSSL/wolfssl/security/advisories')
+        self.assertEqual(adv_refs[0]['referenceCategory'], 'SECURITY')
+
+    def test_creation_info_uses_module_constants(self):
+        # SPDX `creationInfo.creators[]` carries the producer-identity
+        # signal that downstream tools key on; must come from the
+        # module-level constants and not from a stale string.
+        doc = gs.generate_spdx(**self.BASE_KW)
+        creators = doc['creationInfo']['creators']
+        expected_tool = (
+            f'Tool: {gs.GEN_SBOM_TOOL_NAME}-{gs.GEN_SBOM_VERSION}'
+        )
+        self.assertIn(expected_tool, creators)
+
+    def test_annotations_have_well_formed_metadata(self):
+        # SPDX 2.3 §8.5: annotation entries require `annotationDate`
+        # (ISO-8601 with timezone), `annotationType` (one of OTHER,
+        # REVIEW, ...), `annotator` (Person/Organization/Tool prefix),
+        # and `comment` (string).  pyspdxtools rejects malformed
+        # annotation entries; pin the shape here at the cheapest CI
+        # gate so a regression in generate_spdx surfaces in unit
+        # tests rather than in the integration job.
+        doc = gs.generate_spdx(**self.BASE_KW)
+        wolfssl_pkg = next(
+            p for p in doc['packages']
+            if p['SPDXID'] == 'SPDXRef-Package-wolfssl')
+        for ann in wolfssl_pkg['annotations']:
+            self.assertEqual(ann['annotationDate'], self.BASE_KW['timestamp'])
+            self.assertEqual(ann['annotationType'], 'OTHER')
+            self.assertTrue(ann['annotator'].startswith('Tool: '),
+                            f'annotator must use Tool: prefix: {ann!r}')
+            self.assertIsInstance(ann['comment'], str)
+            self.assertTrue(ann['comment'])
 
 
 # ---------------------------------------------------------------------------
