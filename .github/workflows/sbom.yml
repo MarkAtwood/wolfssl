@@ -72,12 +72,22 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install standalone-path deps
-        # pcpp is the in-Python C preprocessor that lets gen-sbom walk
-        # settings.h + user_settings.h with no compiler invocation.
-        # spdx-tools is for the post-generation validation step.
+        # pcpp drives --user-settings; spdx-tools provides pyspdxtools
+        # for SPDX schema validation; cyclonedx-bom provides the
+        # CycloneDX 1.6 strict JSON validator; ntia-conformance-checker
+        # provides the NTIA Minimum Elements (2021) gate.  All four
+        # were previously only run on the autotools integration job,
+        # which left a regression in the standalone path -- the entry
+        # point an embedded customer actually invokes -- detectable
+        # only by hand.  Versions match the integration job below so
+        # tool drift is single-sourced.
         run: |
           python3 -m pip install --user --upgrade pip
-          python3 -m pip install --user 'pcpp==1.30.*' 'spdx-tools==0.8.*'
+          python3 -m pip install --user \
+            'pcpp==1.30.*' \
+            'spdx-tools==0.8.*' \
+            'cyclonedx-bom==7.*' \
+            'ntia-conformance-checker==5.*'
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Generate SBOM via standalone Python entry point
@@ -118,6 +128,34 @@ jobs:
         # the embedded path produces an SBOM autotools' validator
         # rejects, our portability claim is false.
         run: pyspdxtools --infile /tmp/standalone/wolfssl.spdx.json
+
+      - name: Standalone SPDX passes NTIA Minimum Elements (2021)
+        # NTIA Minimum Elements is the conformance gate auditors
+        # actually rely on: a structurally-valid SPDX that is missing
+        # supplier / author / version / unique-id is still useless to
+        # them.  Previously only the autotools job ran this; an NTIA
+        # regression in --user-settings or --srcs handling could only
+        # be caught by hand.  Run it on the standalone path too so
+        # the embedded entry point holds the same contract.
+        run: ntia-checker -c ntia /tmp/standalone/wolfssl.spdx.json
+
+      - name: Standalone CDX validates per CycloneDX 1.6 strict schema
+        # Same validator the autotools job runs.  Pins both entry
+        # points against the same CDX 1.6 schema definition; a
+        # standalone-only CDX regression now fails at PR time.
+        run: |
+          python3 - <<'PY'
+          import sys
+          from cyclonedx.validation.json import JsonStrictValidator
+          from cyclonedx.schema import SchemaVersion
+          v = JsonStrictValidator(SchemaVersion.V1_6)
+          with open('/tmp/standalone/wolfssl.cdx.json') as f:
+              errors = v.validate_str(f.read())
+          if errors:
+              print(f"INVALID: {errors}", file=sys.stderr)
+              sys.exit(1)
+          print("OK: standalone CDX passes CycloneDX 1.6 strict schema")
+          PY
 
       - name: Standalone SBOM advertises source-merkle hash semantics
         # The auditor-facing contract: the standalone SBOM must say
@@ -472,16 +510,23 @@ jobs:
 
       - name: CPE 2.3 and PURL identifiers well-formed
         # A typo in supplier or product name silently breaks every
-        # downstream OSV / Trivy / Grype scan.
+        # downstream OSV / Trivy / Grype scan.  PURL must be `pkg:github`
+        # so OSV/GHSA/Snyk/Trivy resolve directly without per-vendor
+        # CPE-fallback mapping.  An advisory externalRef pointing at the
+        # GitHub Security Advisories index is also pinned so an auditor
+        # reading the SBOM has a single in-document link to the project's
+        # disclosures.
         run: |
           python3 - <<'PY'
-          import glob, json, re, sys
+          import glob, json, re
           with open(glob.glob('wolfssl-*.spdx.json')[0]) as f:
               d = json.load(f)
           refs = {r['referenceType']: r['referenceLocator']
                   for r in d['packages'][0]['externalRefs']}
           assert re.match(r'cpe:2\.3:a:wolfssl:wolfssl:[\d.]+:', refs['cpe23Type']), refs
-          assert re.match(r'pkg:generic/wolfssl@[\d.]+', refs['purl']), refs
+          assert re.match(r'pkg:github/wolfSSL/wolfssl@v[\d.]+', refs['purl']), refs
+          assert refs['advisory'] == \
+              'https://github.com/wolfSSL/wolfssl/security/advisories', refs
           print('identifiers ok:', refs)
           PY
 

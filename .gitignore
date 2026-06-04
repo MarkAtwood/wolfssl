@@ -8,6 +8,18 @@ ctaocrypt/src/src/
 *.libs
 *.cache
 .dirstamp
+
+# SBOM / bomsh output artefacts (produced by `make sbom` / `make bomsh`).
+# Built per-release, not source.  Listed first so they survive any
+# subsequent `!`-style un-ignore patterns added below.
+/wolfssl-*.cdx.json
+/wolfssl-*.spdx.json
+/wolfssl-*.spdx
+/omnibor.wolfssl-*.spdx.json
+/omnibor/
+/_sbom_staging/
+/_bomsh.conf
+/bomsh_raw_logfile*
 *.user
 !*-VS2022.vcxproj.user
 configure
