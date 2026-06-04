@@ -21,9 +21,12 @@ covered:
 | `python3 scripts/gen-sbom …` (standalone) | Embedded / RTOS customers building with their own Makefile, Keil, IAR, STM32CubeIDE, ESP-IDF, Zephyr, plain CMake, etc. | Any |
 | `make sbom` (autotools wrapper) | Linux server / Debian / RPM / Yocto / FIPS-Ready customers running `./configure && make` | Autotools |
 
-Both call the same Python core and produce SBOMs that pass the same SPDX
-2.3 / CycloneDX 1.6 / NTIA validators.  Pick whichever matches your build
-flow.
+Both call the same Python core and produce SBOMs that pass SPDX 2.3
+(`pyspdxtools`) and CycloneDX 1.6 (`cyclonedx-bom` strict JSON validator)
+schema validation.  The autotools `make sbom` integration job
+additionally runs `ntia-conformance-checker` against NTIA Minimum
+Elements 2021; see `.github/workflows/sbom.yml` for the exact set of
+validators run on every PR.  Pick whichever matches your build flow.
 
 ---
 
@@ -415,9 +418,9 @@ Both formats contain the same information:
 | Copyright | `Copyright (C) 2006-<year> wolfSSL Inc.` |
 | SHA-256 | hash of the installed `libwolfssl.so.X.Y.Z` |
 | CPE | `cpe:2.3:a:wolfssl:wolfssl:<version>:*:*:*:*:*:*:*` |
-| PURL | `pkg:generic/wolfssl@<version>` |
+| PURL | `pkg:github/wolfSSL/wolfssl@v<version>` (resolves directly in OSV / GHSA / Snyk / Trivy without per-vendor mapping) |
 | Download location | `https://github.com/wolfSSL/wolfssl` |
-| Third-party deps | none (wolfssl has no runtime dependencies in a default build) |
+| Third-party deps | none in a default build; `--with-libz` adds zlib and `--with-liboqs` adds liboqs (recorded as `DEPENDS_ON` packages with their own purl/CPE/supplier).  All builds depend transitively on the host C runtime; this is not enumerated as an SBOM component since it is system-supplied and varies per runtime target. |
 
 #### License detection
 
@@ -578,19 +581,25 @@ Place `bomsh_create_bom.py` (and optionally `bomsh_sbom.py`) from the bomsh
 
 ### 3.2 What make bomsh does
 
-1. Writes a build-local `_bomsh.conf` redirecting the raw logfile out of
+1. Runs `make clean` to ensure a full rebuild.  This is necessary because
+   `bomtrace3` intercepts syscalls live during compilation and cannot
+   post-process an already-built tree.  This step also removes any prior
+   `wolfssl-<version>.{cdx,spdx}.json` from a stand-alone `make sbom`,
+   which is intentional: the document `make bomsh` enriches must come
+   from the *traced* rebuild, not from a stale pre-trace one.
+2. Writes a build-local `_bomsh.conf` redirecting the raw logfile out of
    `/tmp/` to the build directory (avoids collisions between concurrent
    builds).
-2. Runs `make clean` to ensure a full rebuild.  This is necessary because
-   `bomtrace3` intercepts syscalls live during compilation and cannot
-   post-process an already-built tree.
 3. Runs `bomtrace3 -c _bomsh.conf make` — rebuilds wolfSSL under strace
    tracing, recording every compiler invocation with its inputs and outputs.
 4. Runs `bomsh_create_bom.py` to process the raw logfile and produce the
    OmniBOR artifact graph in `omnibor/`.
-5. If `bomsh_sbom.py` is available **and** `wolfssl-<version>.spdx.json`
-   exists (from `make sbom`), annotates that SPDX document with OmniBOR
-   `ExternalRef` identifiers, producing `omnibor.wolfssl-<version>.spdx.json`.
+5. Discovers the bomsh-traced library under `src/.libs/` and runs
+   `make sbom SBOM_LIB_OVERRIDE=<traced-library>` so the regenerated
+   SPDX hashes the same binary that bomsh traced (see § 3.5).
+6. If `bomsh_sbom.py` is available, annotates the regenerated SPDX
+   document with OmniBOR `ExternalRef` identifiers, producing
+   `omnibor.wolfssl-<version>.spdx.json`.
 
 ### 3.3 Output files
 
@@ -632,26 +641,42 @@ The raw logfile (`bomsh_raw_logfile.sha1`) and conf file (`_bomsh.conf`)
 are written to the build directory and removed by `make clean`.  The
 `omnibor/` tree is also removed by `make clean`.
 
+#### Identity of the SHA-256 in the enriched SPDX
+
+`make bomsh` discovers the bomsh-traced library under
+`$(abs_builddir)/src/.libs/` and passes it to the nested `make sbom`
+invocation as `SBOM_LIB_OVERRIDE`, so the SHA-256 in the SPDX
+`checksums[]` is the SHA-256 of the **exact binary that `bomtrace3`
+traced**.  Without that override `make sbom` would re-link via `make
+install DESTDIR=...` and hash a libtool-relinked artefact whose
+SHA-256 differs from the traced library, leaving the SHA-256 in
+`checksums[]` and the OmniBOR `externalRefs` describing two different
+files in the same SPDX document.
+
 #### CI verifiability gates
 
-The bomsh CI job enforces three independent self-consistency properties
+The bomsh CI job enforces two independent self-consistency properties
 on every PR, in addition to schema validation of the enriched SPDX
 through `pyspdxtools`:
 
 1. **Resolvability** — every `gitoid` listed in the SPDX `externalRefs`
    resolves to a blob present at `omnibor/objects/<aa>/<rest>`.
 2. **Object-store integrity** — every blob in `omnibor/objects/`
-   round-trips through `sha1(b"blob <len>\0" + content)`, so a corrupt or
-   truncated object store is caught at PR time, not by a downstream
+   round-trips through `sha1(b"blob <len>\0" + content)`, so a corrupt
+   or truncated object store is caught at PR time, not by a downstream
    verifier weeks later.
-3. **Artefact correspondence** — the `gitoid` recorded against the
-   `wolfssl` SPDX package equals the git-blob hash of the actual
-   `libwolfssl.{so,dylib,a}` that `make bomsh` traced.  This is what
-   makes the SBOM a true attestation of the binary that would ship,
-   rather than a plausible-looking but fictional reference.
 
-If any of these fail, the PR fails — the bomsh provenance bundle that a
+If either fails, the PR fails — the bomsh provenance bundle that a
 CRA reviewer would download is never published with a broken bridge.
+
+A third gate is **not** implemented: the gitoid that `bomsh_sbom.py`
+attaches to the SPDX is the bom_id of the OmniBOR Input Manifest for
+the traced artefact, not the git-blob hash of the binary itself.  The
+two are different by design (the bom_id summarises the build inputs,
+not the linked output bytes), so a "gitoid == sha1 of the binary"
+check would always fail.  What ties the SBOM to the binary today is
+the SHA-256 in `checksums[]`, which the `SBOM_LIB_OVERRIDE` plumbing
+described above guarantees is the SHA-256 of the bomsh-traced library.
 
 The verifier itself lives at `scripts/bomsh_verify.py` (importable, with
 synthetic-fixture unit tests in `scripts/test_gen_sbom.py`).  Run it

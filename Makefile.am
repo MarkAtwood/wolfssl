@@ -470,6 +470,17 @@ WOLFSSL_LIB_DSO_BASENAMES = \
 #                          their own URL should set this to a URI they
 #                          actually serve (e.g.
 #                          https://example.com/sbom/wolfssl-X.Y.Z.spdx.json).
+#   SBOM_LIB_OVERRIDE      Absolute path to the library artefact whose
+#                          SHA-256 should land in the SBOM, INSTEAD of
+#                          discovering one via a private staging install.
+#                          Set by `make bomsh` so the SBOM hash and the
+#                          OmniBOR enrichment refer to the SAME bomsh-
+#                          traced binary; without this override `make
+#                          sbom` would re-link via `make install` and
+#                          hash a different artefact than `bomsh_sbom.py`
+#                          fingerprints, leaving the SHA-256 in
+#                          `checksums[]` and the gitoid in `externalRefs`
+#                          describing two unrelated files.
 sbom:
 	@if test -z "$(PYTHON3)"; then \
 	    echo ""; \
@@ -487,24 +498,34 @@ sbom:
 	@rm -rf $(abs_builddir)/_sbom_staging
 	@set -e; \
 	trap 'rm -rf $(abs_builddir)/_sbom_staging' EXIT INT TERM HUP; \
-	$(MAKE) install DESTDIR=$(abs_builddir)/_sbom_staging; \
-	sbom_lib=""; \
-	for lib in \
-	    $(addprefix "$(abs_builddir)/_sbom_staging$(libdir)"/,$(WOLFSSL_LIB_DSO_BASENAMES)) \
-	    "$(abs_builddir)/_sbom_staging$(libdir)"/libwolfssl.dll \
-	    "$(abs_builddir)/_sbom_staging$(libdir)"/libwolfssl.dll.a \
-	    "$(abs_builddir)/_sbom_staging$(libdir)"/libwolfssl.lib \
-	    "$(abs_builddir)/_sbom_staging$(libdir)"/wolfssl.lib \
-	    "$(abs_builddir)/_sbom_staging$(libdir)"/libwolfssl.a; do \
-	    if test -f "$$lib"; then sbom_lib="$$lib"; break; fi; \
-	done; \
-	if test -z "$$sbom_lib"; then \
-	    echo ""; \
-	    echo "ERROR: No installed wolfSSL library artifact found for SBOM."; \
-	    echo "       Searched in $(abs_builddir)/_sbom_staging$(libdir)"; \
-	    echo "       (configure with --enable-shared or --enable-static)"; \
-	    echo ""; \
-	    exit 1; \
+	if test -n "$(SBOM_LIB_OVERRIDE)"; then \
+	    if test ! -f "$(SBOM_LIB_OVERRIDE)"; then \
+	        echo ""; \
+	        echo "ERROR: SBOM_LIB_OVERRIDE=$(SBOM_LIB_OVERRIDE) does not exist."; \
+	        echo ""; \
+	        exit 1; \
+	    fi; \
+	    sbom_lib="$(SBOM_LIB_OVERRIDE)"; \
+	else \
+	    $(MAKE) install DESTDIR=$(abs_builddir)/_sbom_staging; \
+	    sbom_lib=""; \
+	    for lib in \
+	        $(addprefix "$(abs_builddir)/_sbom_staging$(libdir)"/,$(WOLFSSL_LIB_DSO_BASENAMES)) \
+	        "$(abs_builddir)/_sbom_staging$(libdir)"/libwolfssl.dll \
+	        "$(abs_builddir)/_sbom_staging$(libdir)"/libwolfssl.dll.a \
+	        "$(abs_builddir)/_sbom_staging$(libdir)"/libwolfssl.lib \
+	        "$(abs_builddir)/_sbom_staging$(libdir)"/wolfssl.lib \
+	        "$(abs_builddir)/_sbom_staging$(libdir)"/libwolfssl.a; do \
+	        if test -f "$$lib"; then sbom_lib="$$lib"; break; fi; \
+	    done; \
+	    if test -z "$$sbom_lib"; then \
+	        echo ""; \
+	        echo "ERROR: No installed wolfSSL library artifact found for SBOM."; \
+	        echo "       Searched in $(abs_builddir)/_sbom_staging$(libdir)"; \
+	        echo "       (configure with --enable-shared or --enable-static)"; \
+	        echo ""; \
+	        exit 1; \
+	    fi; \
 	fi; \
 	echo "SBOM: hashing $$sbom_lib"; \
 	if test -z "$${SOURCE_DATE_EPOCH:-}" && test -n "$(GIT)" && \
@@ -559,6 +580,17 @@ bomshdir          = $(datadir)/doc/$(PACKAGE)
 # also what makes the combined workflow correct: `make sbom` writes the SPDX,
 # but `make bomsh` issues `make clean` (which removes it via CLEANFILES), so
 # the only reliable way to enrich is to regenerate after the traced build.
+#
+# After the traced rebuild we discover the bomsh-traced library in
+# $(abs_builddir)/src/.libs/ and pass it to the nested `make sbom` call as
+# SBOM_LIB_OVERRIDE.  Without the override `make sbom` would `make install
+# DESTDIR=...` into a private tree, which triggers a libtool relink and
+# produces a binary whose SHA-256 differs from the one bomtrace3 traced.
+# That left the gitoid in `externalRefs` (which IS for the traced binary)
+# and the SHA-256 in `checksums[]` (which was NOT) describing two different
+# files in the same SPDX document.  With the override they describe the
+# same artefact, which is the invariant any auditor reading the document
+# expects.
 bomsh:
 	@if test -z "$(BOMTRACE3)"; then \
 	    echo ""; \
@@ -578,13 +610,7 @@ bomsh:
 	@printf 'raw_logfile=%s\n' '$(BOMSH_RAWLOG_BASE)' > '$(BOMSH_CONF)'
 	$(BOMTRACE3) -c '$(BOMSH_CONF)' $(MAKE)
 	$(BOMSH_CREATE_BOM) -r '$(BOMSH_RAWLOG)' -b '$(BOMSH_OMNIBORDIR)'
-	$(MAKE) sbom
-	@if test -z "$(BOMSH_SBOM)"; then \
-	    echo "NOTE: bomsh_sbom.py not in PATH; skipping SPDX enrichment."; \
-	    echo "      The OmniBOR graph in $(BOMSH_OMNIBORDIR) is still produced."; \
-	    exit 0; \
-	fi; \
-	bomsh_artifact=""; \
+	@bomsh_artifact=""; \
 	for lib in \
 	    $(addprefix "$(abs_builddir)/src/.libs"/,$(WOLFSSL_LIB_DSO_BASENAMES)) \
 	    "$(abs_builddir)/src/.libs/libwolfssl.a" \
@@ -593,7 +619,16 @@ bomsh:
 	done; \
 	if test -z "$$bomsh_artifact"; then \
 	    echo "NOTE: no built libwolfssl artifact found in $(abs_builddir)/src/.libs/"; \
-	    echo "      OmniBOR graph produced; SPDX enrichment skipped."; \
+	    echo "      OmniBOR graph produced; SBOM regeneration + SPDX"; \
+	    echo "      enrichment skipped."; \
+	    exit 0; \
+	fi; \
+	echo "bomsh: traced binary -> $$bomsh_artifact"; \
+	$(MAKE) sbom SBOM_LIB_OVERRIDE="$$bomsh_artifact"; \
+	if test -z "$(BOMSH_SBOM)"; then \
+	    echo "NOTE: bomsh_sbom.py not in PATH; skipping SPDX enrichment."; \
+	    echo "      The OmniBOR graph in $(BOMSH_OMNIBORDIR) is still produced."; \
+	    echo "      The base SBOM in $(SBOM_SPDX) already hashes the bomsh-traced binary."; \
 	    exit 0; \
 	fi; \
 	echo "Enriching SPDX with OmniBOR ExternalRefs (artifact: $$bomsh_artifact)..."; \
