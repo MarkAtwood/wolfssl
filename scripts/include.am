@@ -193,3 +193,13 @@ EXTRA_DIST += scripts/gen-advisory \
               scripts/cwe-names.json \
               scripts/advisory-vex-overlay.schema.json \
               scripts/advisory-vex-overlay.example.json
+
+# Advisory regression suite + CSAF 2.0 conformance gate, with the frozen CVE
+# fixtures they run against.  Shipped so a downstream consumer / CRA reviewer
+# can re-run the advisory tests from a release tarball.
+EXTRA_DIST += scripts/csaf_validate.mjs \
+              scripts/test_gen_advisory.py \
+              scripts/testdata/README.md \
+              scripts/testdata/CVE-2026-5501.json \
+              scripts/testdata/CVE-2026-5778.json \
+              scripts/testdata/CVE-2026-5999.json
