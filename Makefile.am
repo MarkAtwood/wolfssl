@@ -565,6 +565,72 @@ uninstall-sbom:
 
 CLEANFILES += $(SBOM_CDX) $(SBOM_SPDX) $(SBOM_SPDX_TV)
 
+# Security advisory generation (CSAF 2.0 + CycloneDX 1.6 VEX)
+#
+# `make advisory` is a thin wrapper around scripts/gen-advisory: it feeds the
+# script the canonical advisory single-source-of-truth under advisories/ and is
+# byte-for-byte interchangeable with running the script by hand.  Equivalent
+# invocations:
+#
+#     make advisory
+#     python3 scripts/gen-advisory                       # uses the same defaults
+#     python3 scripts/gen-advisory \
+#         --records-dir advisories/records \
+#         --vex-overlay advisories/vex-overlay.json \
+#         --out-dir advisories/out
+#
+# Inputs  (tracked in git): advisories/records/CVE-*.json + advisories/vex-overlay.json
+# Outputs (build artifacts): advisories/out/CVE-*.{csaf,cdx}.json
+ADVISORY_RECORDS_DIR = $(srcdir)/advisories/records
+ADVISORY_OVERLAY     = $(srcdir)/advisories/vex-overlay.json
+ADVISORY_OUT_DIR     = $(abs_builddir)/advisories/out
+advisorydir          = $(datadir)/doc/$(PACKAGE)/advisories
+
+.PHONY: advisory install-advisory uninstall-advisory
+
+# Generate one CSAF + one CycloneDX VEX document per CVE record.  Honors
+# SOURCE_DATE_EPOCH for reproducible output (set from the last git commit when
+# unset and a git tree is available), exactly like `make sbom`.
+advisory:
+	@if test -z "$(PYTHON3)"; then \
+	    echo ""; \
+	    echo "ERROR: 'python3' not found in PATH. Cannot generate advisories."; \
+	    echo ""; \
+	    exit 1; \
+	fi
+	@set -e; \
+	if test -z "$${SOURCE_DATE_EPOCH:-}" && test -n "$(GIT)" && \
+	   $(GIT) -C "$(srcdir)" rev-parse --git-dir >/dev/null 2>&1; then \
+	    sde=`$(GIT) -C "$(srcdir)" log -1 --format=%ct 2>/dev/null`; \
+	    if test -n "$$sde"; then \
+	        SOURCE_DATE_EPOCH="$$sde"; \
+	        export SOURCE_DATE_EPOCH; \
+	    fi; \
+	fi; \
+	$(PYTHON3) $(srcdir)/scripts/gen-advisory \
+	    --records-dir $(ADVISORY_RECORDS_DIR) \
+	    --vex-overlay $(ADVISORY_OVERLAY) \
+	    --out-dir $(ADVISORY_OUT_DIR)
+
+install-advisory: advisory
+	$(MKDIR_P) $(DESTDIR)$(advisorydir)
+	@for f in $(ADVISORY_OUT_DIR)/*.json; do \
+	    echo " $(INSTALL_DATA) $$f $(DESTDIR)$(advisorydir)/"; \
+	    $(INSTALL_DATA) "$$f" $(DESTDIR)$(advisorydir)/; \
+	done
+
+uninstall-advisory:
+	-rm -f $(DESTDIR)$(advisorydir)/*.csaf.json
+	-rm -f $(DESTDIR)$(advisorydir)/*.cdx.json
+
+CLEANFILES += advisories/out/*.csaf.json advisories/out/*.cdx.json
+
+# Ship the advisory generator inputs in the dist tarball so a downstream
+# consumer can `./configure && make advisory` from a release.
+EXTRA_DIST += advisories/records/CVE-2026-5501.json \
+              advisories/records/CVE-2026-5778.json \
+              advisories/vex-overlay.json
+
 # Bomsh (OmniBOR build artifact tracing + SBOM enrichment)
 BOMSH_RAWLOG_BASE      = $(abs_builddir)/bomsh_raw_logfile
 BOMSH_RAWLOG           = $(BOMSH_RAWLOG_BASE).sha1

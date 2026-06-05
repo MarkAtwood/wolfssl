@@ -185,3 +185,11 @@ EXTRA_DIST += scripts/test_gen_sbom.py
 # re-verify the OmniBOR graph against its enriched SPDX without going
 # back to the git repo.
 EXTRA_DIST += scripts/bomsh_verify.py
+
+# Security advisory generator (invoked from `make advisory`), its canonical
+# CWE-name catalogue, and the VEX overlay schema + example.  Shipped so a
+# downstream consumer building from a release tarball can run `make advisory`.
+EXTRA_DIST += scripts/gen-advisory \
+              scripts/cwe-names.json \
+              scripts/advisory-vex-overlay.schema.json \
+              scripts/advisory-vex-overlay.example.json
