@@ -1253,6 +1253,58 @@ class TestDepVersionOverride(unittest.TestCase):
         self.assertEqual(out, {'libz': '1.3.1', 'liboqs': '0.10.0'})
 
 
+class TestResolveDepVersionsSingleShot(unittest.TestCase):
+    """Each enabled dependency's version must be resolved exactly once (in
+    main, via _resolve_dep_versions), not once per output format.  Without
+    the precompute, generate_cdx and generate_spdx each call dep_version()
+    independently, so a default --with-libz --with-liboqs build would shell
+    out to `pkg-config --modversion` four times (2 deps x CDX+SPDX) instead
+    of twice -- and the two documents could disagree if pkg-config were ever
+    non-deterministic.  These tests lock that single-resolution behaviour in."""
+
+    def test_pkgconfig_called_once_per_dep(self):
+        calls = []
+        original = gs.pkgconfig_version
+        try:
+            gs.pkgconfig_version = lambda pkg: (calls.append(pkg), '1.2.3')[1]
+            overrides = gs._resolve_dep_versions(['libz', 'liboqs'], {})
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(overrides['libz'], '1.2.3')
+            self.assertEqual(overrides['liboqs'], '1.2.3')
+            # The emitters reuse the cached value: a later dep_version() for
+            # an already-resolved key must not re-invoke pkg-config.
+            gs.dep_version('libz', overrides)
+            gs.dep_version('liboqs', overrides)
+            self.assertEqual(len(calls), 2)
+        finally:
+            gs.pkgconfig_version = original
+
+    def test_user_override_skips_pkgconfig(self):
+        calls = []
+        original = gs.pkgconfig_version
+        try:
+            gs.pkgconfig_version = lambda pkg: (calls.append(pkg), '9.9.9')[1]
+            overrides = gs._resolve_dep_versions(['libz'], {'libz': '1.3.1'})
+            self.assertEqual(overrides['libz'], '1.3.1')
+            self.assertEqual(calls, [])
+        finally:
+            gs.pkgconfig_version = original
+
+    def test_none_is_cached_when_pkgconfig_missing(self):
+        calls = []
+        original = gs.pkgconfig_version
+        try:
+            gs.pkgconfig_version = lambda pkg: (calls.append(pkg), None)[1]
+            overrides = gs._resolve_dep_versions(['liboqs'], {})
+            self.assertIn('liboqs', overrides)
+            self.assertIsNone(overrides['liboqs'])
+            # A cached None must short-circuit later lookups too.
+            gs.dep_version('liboqs', overrides)
+            self.assertEqual(len(calls), 1)
+        finally:
+            gs.pkgconfig_version = original
+
+
 class TestCliMutualExclusion(unittest.TestCase):
     """The two entry-point shapes (autotools / standalone) must be
     mutually exclusive.  Mixing them would produce a hash whose

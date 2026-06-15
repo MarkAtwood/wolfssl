@@ -923,6 +923,21 @@ def _parse_dep_version_overrides(spec_list):
     return overrides
 
 
+def _resolve_dep_versions(enabled_deps, overrides):
+    """Resolve each enabled dependency's version exactly once, mutating and
+    returning `overrides` so both the CDX and SPDX emitters reuse the same
+    value instead of each re-invoking pkg-config.  Caching the result
+    (including None) means a later dep_version() lookup short-circuits on the
+    membership check rather than re-shelling to `pkg-config --modversion`, so
+    a default --with-libz --with-liboqs build calls pkg-config once per dep
+    (not once per dep per output format) and the two documents can never
+    disagree if pkg-config output were ever non-deterministic."""
+    for key in enabled_deps:
+        if key not in overrides:
+            overrides[key] = dep_version(key, overrides)
+    return overrides
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Generate CycloneDX and SPDX SBOMs for wolfssl. '
@@ -1061,6 +1076,10 @@ def main():
         if flag.lower() == 'yes'
     ]
     dep_version_overrides = _parse_dep_version_overrides(args.dep_version)
+    # Resolve each enabled dependency's version once, here, and feed the
+    # result to both the CDX and SPDX emitters via the overrides map (see
+    # _resolve_dep_versions for the once-per-dep pkg-config rationale).
+    _resolve_dep_versions(enabled_deps, dep_version_overrides)
 
     if args.license_override:
         license_id = args.license_override

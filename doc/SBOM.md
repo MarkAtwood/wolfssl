@@ -498,7 +498,15 @@ its `.pc` file is missing):
   prints a warning to stderr.
 
 For embedded / cross-compile builds without `pkg-config`, the standalone
-entry point exposes a `--dep-version libz=1.3.1` override (see § 1.2).
+entry point exposes a `--dep-version libz=1.3.1` override (see § 1.2). The
+autotools path exposes the same override through the `SBOM_DEP_VERSIONS`
+make variable (space-separated `KEY=VERSION` pairs), so a packaging host
+that lacks the dependency's `.pc` file can still record the version instead
+of `NOASSERTION`:
+
+```sh
+make sbom SBOM_DEP_VERSIONS='liboqs=0.10.0 libz=1.3.1'
+```
 
 ### 2.5 Validating the SBOM manually
 

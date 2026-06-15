@@ -340,10 +340,8 @@ def product_model(adv, ov):
         modver = fips.get('module_version')
         fbucket = _STATE_TO_BUCKET.get(fips.get('status', 'exploitable'),
                                        'known_affected')
-        if fips.get('status') in _STATE_TO_BUCKET:
-            fbucket = _STATE_TO_BUCKET[fips['status']]
         affected_ranges = []
-        if fbucket != 'fixed' and modver:
+        if modver:
             affected_ranges.append({
                 'label': modver,
                 'cpe': cpe_for('wolfcrypt', modver),
