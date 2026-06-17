@@ -464,7 +464,7 @@ WOLFSSL_LIB_DSO_BASENAMES = \
 #                          LicenseRef is in use; `make sbom` exits with an
 #                          error if it is missing.
 #   SBOM_DOCUMENT_NAMESPACE Override the SPDX documentNamespace.  Default
-#                          is a deterministic urn:uuid (SPDX 2.3 §6.5
+#                          is a deterministic urn:uuid (SPDX 2.3 sec. 6.5
 #                          requires only uniqueness, not resolvability).
 #                          Downstream packagers re-hosting the SBOM under
 #                          their own URL should set this to a URI they

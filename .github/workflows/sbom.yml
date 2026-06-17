@@ -738,11 +738,6 @@ jobs:
           assert 'purl' in refs, refs
           assert re.match(r'pkg:github/open-quantum-safe/liboqs@', refs['purl']), \
               refs['purl']
-          # Algorithm enablement must still be visible via build_props
-          # (parsed from options.h), not via the dep entry.
-          props = {p['name']: p['value']
-                   for p in d['packages'][0].get('annotations', [])
-                   if p.get('annotationType') == 'OTHER'}
           # CycloneDX side: same package + version present.
           with open(glob.glob('wolfssl-*.cdx.json')[0]) as f:
               cdx = json.load(f)
@@ -759,12 +754,9 @@ jobs:
           import glob, json
           with open(glob.glob('wolfssl-*.spdx.json')[0]) as f:
               d = json.load(f)
-          wolf = [p for p in d['packages'] if p['name'] == 'wolfssl'][0]
-          props = {p['name']: p['value']
-                   for p in wolf.get('annotations', [])
-                   if p.get('annotationType') == 'OTHER'}
           # Build props can land as annotations or as a 'attributionTexts'
-          # block depending on SPDX version; check both.
+          # block depending on SPDX version; serialize the whole doc and
+          # check the flag is present somewhere.
           combined = json.dumps(d)
           assert 'HAVE_FALCON' in combined, \
               "HAVE_FALCON missing from SBOM build properties"

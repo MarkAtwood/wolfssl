@@ -534,19 +534,19 @@ class TestExampleOverlay(unittest.TestCase):
 
     def test_states_and_justifications_in_vocab(self):
         states = self._enum('analysisState')
-        justs = self._enum('justification')
+        justifications = self._enum('justification')
         for cve, entry in self.overlay.items():
             if cve.startswith('_'):
                 continue
             if 'state' in entry:
                 self.assertIn(entry['state'], states)
             if 'justification' in entry:
-                self.assertIn(entry['justification'], justs)
+                self.assertIn(entry['justification'], justifications)
             fips = entry.get('fips', {})
             if 'status' in fips:
                 self.assertIn(fips['status'], states)
             if 'justification' in fips:
-                self.assertIn(fips['justification'], justs)
+                self.assertIn(fips['justification'], justifications)
 
     def test_not_affected_requires_justification(self):
         for cve, entry in self.overlay.items():

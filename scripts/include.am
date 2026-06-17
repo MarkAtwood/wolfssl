@@ -180,7 +180,7 @@ EXTRA_DIST += scripts/test_gen_sbom.py
 
 # Bomsh / OmniBOR provenance verifier (invoked from `.github/workflows/
 # sbom.yml` and runnable by hand against any local `make bomsh` output;
-# see doc/SBOM.md § 3.5).  Must ship with the dist tarball so a
+# see doc/SBOM.md sec. 3.5).  Must ship with the dist tarball so a
 # downstream consumer / CRA reviewer who clones a release tarball can
 # re-verify the OmniBOR graph against its enriched SPDX without going
 # back to the git repo.
