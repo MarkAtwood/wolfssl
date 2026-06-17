@@ -490,8 +490,17 @@ wrapper/Ada/obj/
 wolfssl/debug-trace-error-codes.h
 wolfssl/debug-untrace-error-codes.h
 
-AGENTS.md
+# AI tool local files
 CLAUDE.md
+.claude/
+.beads/
+.cursorrules
+.cursor/
+.aider*
+.copilot/
+.continue/
+.windsurf/
+.codeium/
 
 # Code navigation files
 compile_commands.json
