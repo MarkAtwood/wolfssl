@@ -1,53 +1,8 @@
 # Building wolfSSL on Windows
 
-There are several build paths for Windows. Choose the one that fits your toolchain.
+Use CMake for Windows builds. It generates Visual Studio projects with full feature configurability and works well with VS Code, Visual Studio, and command-line workflows.
 
-## Visual Studio (recommended)
-
-Open `wolfssl64.sln` in Visual Studio 2019 or later.
-
-**Supported targets:** x64, Win32, ARM64
-**Configurations:** Debug, Release, DLL Debug, DLL Release
-
-### Command-line build
-
-Open a "Developer Command Prompt for VS 2019/2022" (or run `vcvarsall.bat`), then:
-
-```cmd
-msbuild /m /p:PlatformToolset=v142 /p:Platform=x64 /p:Configuration=Release wolfssl64.sln
-```
-
-### Running tests
-
-```cmd
-:: x64
-Release\x64\testsuite.exe
-
-:: Win32
-Release\Win32\testsuite.exe
-```
-
-ARM64 cross-compiles but requires an ARM64 device to run tests.
-
-### Enabling features
-
-The Visual Studio projects control features via preprocessor defines in the `.vcxproj` files. Two approaches:
-
-1. **Edit preprocessor definitions** in Project Properties > C/C++ > Preprocessor Definitions. Add or remove wolfSSL feature macros (e.g., `HAVE_SNI`, `HAVE_AESGCM`, `WOLFSSL_TLS13`).
-
-2. **Use a `user_settings.h` file** for more control. Add `WOLFSSL_USER_SETTINGS` to the preprocessor definitions and create a `user_settings.h` file. See `examples/configs/` for templates — `user_settings_all.h` is equivalent to `./configure --enable-all`.
-
-### Additional Visual Studio solutions
-
-| Solution | Purpose |
-|----------|---------|
-| `wolfcrypt/benchmark/benchmark.sln` | Crypto benchmarks |
-| `wolfcrypt/benchmark/benchmark-VS2022.sln` | Crypto benchmarks (VS2022) |
-| `wolfcrypt/test/test.sln` | Crypto tests only |
-| `wolfcrypt/test/test-VS2022.sln` | Crypto tests only (VS2022) |
-| `wrapper/CSharp/wolfSSL_CSharp.sln` | C# wrapper |
-
-## CMake
+## CMake (recommended)
 
 ```cmd
 mkdir build && cd build
@@ -65,7 +20,43 @@ cmake .. -G "Visual Studio 17 2022" -A Win32
 cmake .. -G "Visual Studio 17 2022" -A ARM64
 ```
 
-Note: CMake integration in Visual Studio 2019 has known issues. Using the CMake GUI or command line is more reliable than the built-in VS CMake support.
+### Enabling features with CMake
+
+CMake options map to the autotools `--enable-*` flags. Use `-D` to set them:
+
+```cmd
+cmake .. -G "Visual Studio 17 2022" -A x64 ^
+  -DWOLFSSL_OPENSSLEXTRA=yes ^
+  -DWOLFSSL_SNI=yes ^
+  -DWOLFSSL_DTLS13=yes
+```
+
+Run `cmake -LH ..` to list all available options with descriptions.
+
+### VS Code integration
+
+CMake is the best path for VS Code on Windows. Install the CMake Tools extension, open the wolfssl directory, and VS Code will detect `CMakePresets.json` automatically. Select the `vs2022-x64` preset to configure, build, and debug.
+
+## Visual Studio solution (alternative)
+
+A pre-built Visual Studio solution is also available at `wolfssl64.sln` (VS2019+). This supports x64, Win32, and ARM64 with Debug, Release, DLL Debug, and DLL Release configurations.
+
+Command-line build:
+
+```cmd
+:: Open a Developer Command Prompt for VS 2019/2022 first
+msbuild /m /p:PlatformToolset=v142 /p:Platform=x64 /p:Configuration=Release wolfssl64.sln
+```
+
+Run tests:
+
+```cmd
+Release\x64\testsuite.exe
+```
+
+The `.sln` controls features via preprocessor defines in the `.vcxproj` files. For more flexibility, use CMake or create a `user_settings.h` (add `WOLFSSL_USER_SETTINGS` to preprocessor defines — see `examples/configs/` for templates).
+
+Additional solutions: `wolfcrypt/test/test.sln` (crypto tests), `wolfcrypt/benchmark/benchmark.sln` (benchmarks), `wrapper/CSharp/wolfSSL_CSharp.sln` (C# wrapper).
 
 ## MSYS2 (autoconf on Windows)
 
