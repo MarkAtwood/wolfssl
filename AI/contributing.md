@@ -1,5 +1,9 @@
 # Contributing to wolfSSL
 
+## Contributor Agreement
+
+External contributors must sign a contributor agreement before pull requests can be merged. When you open your first PR, a wolfSSL team member will ask you to email support@wolfssl.com referencing the PR. The agreement is tracked via wolfSSL's Zendesk ticketing system. Once signed, your PR will be approved for CI testing.
+
 ## Fork Workflow
 
 Do not push branches to this repository. Fork to your personal GitHub account and open pull requests from your fork.
@@ -12,7 +16,7 @@ CI enforces all of these on every PR. Violations block merge.
 
 - **No trailing whitespace.** Files must end with a newline.
 - **No hard tabs** in C, header, or YAML files. Makefiles are exempt.
-- **No non-ASCII bytes** in source files. Specific exclusions exist for test data files.
+- **ASCII only.** No non-ASCII bytes in source files. All code, comments, and string literals must be pure ASCII. Specific exclusions exist for test data files.
 - **No CR characters** (`\r`). Use Unix line endings.
 
 ### C Style

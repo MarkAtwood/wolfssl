@@ -37,7 +37,9 @@ Detailed build instructions for each platform:
 
 See **[AI/contributing.md](AI/contributing.md)** for the full guide. The essentials:
 
+- **Contributor agreement required.** External contributors must sign a contributor agreement — email support@wolfssl.com referencing your PR.
 - **Fork workflow.** Do not push branches to this repository. Fork to your personal GitHub account and open PRs from your fork.
+- **ASCII only.** No non-ASCII bytes in source files.
 - **C comments only.** Use `/* */`, not `//`, in `.c` and `.h` files.
 - **No AI attribution in commits.** CI rejects `Co-authored-by:` or `Signed-off-by:` trailers referencing `noreply@anthropic.com`, `noreply@openai.com`, GitHub Copilot, or any `[bot]` address.
 - **No trailing whitespace.** No hard tabs (except Makefiles). Files must end with a newline.
