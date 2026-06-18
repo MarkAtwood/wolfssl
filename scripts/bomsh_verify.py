@@ -34,11 +34,17 @@ import glob as _glob
 import hashlib
 import json
 import os
+import re
 import sys
 from typing import List
 
 
 GITOID_LOCATOR_PREFIX = 'gitoid:blob:sha1:'
+# An OmniBOR sha1 gitoid is exactly 40 lowercase-hex chars.  Validate before
+# the value is used to build an object path: a crafted SPDX with a locator like
+# 'gitoid:blob:sha1:../../../etc/shadow' otherwise passes the prefix check and
+# turns the os.path.join() below into a path-traversal existence oracle.
+_SHA1_HEX_RE = re.compile(r'[0-9a-f]{40}\Z')
 
 
 def gitoid_sha1(path):
@@ -75,8 +81,13 @@ def load_spdx_gitoids(spdx_path):
                     f'unexpected gitoid locator format: {loc!r} '
                     f'(expected {GITOID_LOCATOR_PREFIX}<hex>; if bomsh '
                     f'has switched to sha256 the verifier needs updating)')
-            gitoids.append((pkg.get('name', '<no-name>'),
-                            loc[len(GITOID_LOCATOR_PREFIX):]))
+            gid = loc[len(GITOID_LOCATOR_PREFIX):]
+            if not _SHA1_HEX_RE.match(gid):
+                raise ValueError(
+                    f'malformed gitoid {gid!r} in locator {loc!r}: expected '
+                    f'40 lowercase-hex sha1 characters (refusing to use it in '
+                    f'an object path)')
+            gitoids.append((pkg.get('name', '<no-name>'), gid))
     return gitoids
 
 

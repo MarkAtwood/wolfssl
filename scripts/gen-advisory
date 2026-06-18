@@ -82,6 +82,25 @@ WOLFSSL_PUBLISHER = {
     'namespace': 'https://www.wolfssl.com',
 }
 WOLFSSL_ADVISORIES_URL = 'https://www.wolfssl.com/docs/security-vulnerabilities/'
+# Canonical directory under which the generated CSAF JSON documents are
+# published.  CSAF 2.0 requires the document's `self` reference to point at the
+# canonical location of *this* document (not a generic landing page), so the
+# self URL is built as <base>/<tracking-id>.csaf.json, matching the on-disk
+# filename this script writes.
+#
+# DEPLOY-TIME FOLLOW-UPS (not enforced by the CSAF mandatory-test gate in
+# .github/workflows/advisory.yml, which validates document content, not the
+# distribution layout):
+#   - Base URL: this is a placeholder and will 404 until the documents are
+#     actually hosted.  Point it at wolfSSL's real CSAF distribution location.
+#   - Filename convention: CSAF's recommended filename is the tracking id
+#     lowercased with every char outside [+\-a-z0-9] replaced by '_' and a
+#     plain '.json' extension (e.g. cve-2026-5501.json).  We keep the
+#     '<ID>.csaf.json' form here so the self URL stays consistent with the
+#     emitted file and so co-located '<ID>.cdx.json' VEX docs remain glob-
+#     selectable; switch both the self URL and the writer to the canonical
+#     lowercase name when the hosting layout is finalized.
+WOLFSSL_CSAF_BASE_URL = WOLFSSL_ADVISORIES_URL + 'csaf/'
 
 ADVISORY_UUID_NAMESPACE = uuid.uuid5(uuid.NAMESPACE_URL,
                                      'https://wolfssl.com/advisory/')
@@ -90,14 +109,41 @@ ADVISORY_UUID_NAMESPACE = uuid.uuid5(uuid.NAMESPACE_URL,
 _SEV_RANK = {'CRITICAL': 4, 'HIGH': 3, 'MEDIUM': 2, 'MODERATE': 2, 'LOW': 1,
              'NONE': 0}
 
-# CycloneDX analysis.state -> CSAF product_status bucket for affected products.
-# not_affected is handled separately (it also needs a flag justification).
+# CycloneDX analysis.state -> CSAF product_status bucket for the *vulnerable*
+# version ranges (those the CVE record marks status=affected).  Every state in
+# the CycloneDX 1.6 vocabulary (mirrored by the overlay schema) is mapped
+# explicitly; _bucket_for() hard-fails on anything else rather than silently
+# defaulting an unknown determination to the worst case (known_affected).
+#
+# 'resolved' / 'resolved_with_pedigree' map to known_affected on purpose: the
+# ranges placed in this bucket are the vulnerable versions, which remain
+# affected even after a fix ships.  The fixed version is emitted separately
+# into the 'fixed' bucket (see the per-product registration loop), so a
+# resolved CVE correctly reports old ranges as known_affected and the patched
+# release as fixed.  Mapping 'resolved' to 'fixed' here would wrongly mark the
+# vulnerable ranges as patched.
+#
+# not_affected / false_positive map to known_not_affected (and also emit a CSAF
+# flag justification).
 _STATE_TO_BUCKET = {
     'exploitable': 'known_affected',
     'in_triage': 'under_investigation',
     'resolved': 'known_affected',
+    'resolved_with_pedigree': 'known_affected',
+    'false_positive': 'known_not_affected',
     'not_affected': 'known_not_affected',
 }
+
+
+def _bucket_for(state):
+    """Map a CycloneDX analysis state to its CSAF product_status bucket,
+    failing loudly on an unrecognized state instead of defaulting to the
+    worst-case (known_affected) bucket."""
+    try:
+        return _STATE_TO_BUCKET[state]
+    except KeyError:
+        sys.exit(f"ERROR: unknown analysis state {state!r}; expected one of "
+                 f"{', '.join(sorted(_STATE_TO_BUCKET))}")
 
 # CycloneDX not_affected justification -> CSAF flag label (same VEX concept).
 _JUSTIFICATION_TO_CSAF_FLAG = {
@@ -300,7 +346,7 @@ def product_model(adv, ov):
     products = []
 
     state = ov.get('state', 'exploitable')
-    bucket = _STATE_TO_BUCKET.get(state, 'known_affected')
+    bucket = _bucket_for(state)
 
     # ---- mainline product(s) from the CVE record's affected[] ----
     for a in adv['affected']:
@@ -338,8 +384,7 @@ def product_model(adv, ov):
     if fips:
         name = fips.get('name', 'wolfCrypt FIPS Module')
         modver = fips.get('module_version')
-        fbucket = _STATE_TO_BUCKET.get(fips.get('status', 'exploitable'),
-                                       'known_affected')
+        fbucket = _bucket_for(fips.get('status', 'exploitable'))
         affected_ranges = []
         if modver:
             affected_ranges.append({
@@ -574,9 +619,18 @@ def generate_csaf(advs, ov_map, advisory_id, timestamp):
                 },
             },
             'distribution': {'tlp': {'label': 'WHITE'}},
-            'references': [{
-                'summary': 'wolfSSL published security vulnerabilities',
-                'url': WOLFSSL_ADVISORIES_URL, 'category': 'self'}],
+            'references': [
+                {
+                    'summary': f'Canonical CSAF document for {advisory_id}',
+                    'url': f'{WOLFSSL_CSAF_BASE_URL}{advisory_id}.csaf.json',
+                    'category': 'self',
+                },
+                {
+                    'summary': 'wolfSSL published security vulnerabilities',
+                    'url': WOLFSSL_ADVISORIES_URL,
+                    'category': 'external',
+                },
+            ],
             'notes': [{
                 'category': 'summary',
                 'title': 'Summary',

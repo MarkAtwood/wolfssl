@@ -105,6 +105,7 @@
         },
         "fips": { "$ref": "#/$defs/fips" }
       },
+      "required": ["state"],
       "additionalProperties": false,
       "allOf": [
         {

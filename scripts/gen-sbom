@@ -579,9 +579,12 @@ def gitoid_blob_sha256(path):
     """
     h = hashlib.sha256()
     try:
-        size = os.path.getsize(path)
-        h.update(f'blob {size}\x00'.encode())
         with open(path, 'rb') as f:
+            # Take the size from the open descriptor (not a prior
+            # os.path.getsize) so the gitoid header length and the bytes
+            # hashed below come from the same file, with no TOCTOU window.
+            size = os.fstat(f.fileno()).st_size
+            h.update(f'blob {size}\x00'.encode())
             for chunk in iter(lambda: f.read(65536), b''):
                 h.update(chunk)
     except OSError as e:

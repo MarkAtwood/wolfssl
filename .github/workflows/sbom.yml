@@ -32,7 +32,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Syntax check
         run: python3 -m py_compile scripts/gen-sbom
@@ -69,7 +69,7 @@ jobs:
     needs: unit
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Install standalone-path deps
         # pcpp drives --user-settings; spdx-tools provides pyspdxtools
@@ -403,7 +403,7 @@ jobs:
       # assertion above fails (which is precisely when the bytes matter).
       - name: Upload standalone SBOMs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: sbom-standalone-${{ github.sha }}
           path: |
@@ -428,7 +428,7 @@ jobs:
     needs: unit
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       # Pin tool versions; drift in any of these silently changes what
       # "valid" means and produces mystery CI failures.
@@ -664,7 +664,7 @@ jobs:
       - name: Install liboqs (provides liboqs.pc for --with-liboqs)
         # Ubuntu noble (24.04) does not ship liboqs-dev in its archive
         # (Debian sid has 0.7.x; Ubuntu only has unsupported PPAs).  Build
-        # from a pinned upstream tag so this job stays deterministic across
+        # from a pinned upstream commit so this job stays deterministic across
         # runs - any future liboqs API/ABI break shows up here, not in
         # production builds.  Pinning matters: SBOM correctness assertions
         # below check purl shape, and an unpinned 'main' would silently
@@ -673,8 +673,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             cmake ninja-build libssl-dev
-          git clone --depth=1 --branch 0.12.0 \
+          # Pin to the exact commit the 0.12.0 tag resolves to (a tag is
+          # mutable, a SHA is not) so this provenance workflow's own build
+          # inputs are immutable.  --filter=blob:none keeps the commit graph
+          # so `git checkout <SHA>` works without a full blob download.
+          git clone --filter=blob:none \
             https://github.com/open-quantum-safe/liboqs /tmp/liboqs
+          git -C /tmp/liboqs checkout f4b96220e4bd208895172acc4fedb5a191d9f5b1 # 0.12.0
           # -DOQS_USE_OPENSSL=OFF is load-bearing: without it, liboqs's
           # installed common.h pulls <openssl/crypto.h> (system) into every
           # TU that includes <oqs/oqs.h>.  wolfssl/wolfcrypt/falcon.h
@@ -814,7 +819,7 @@ jobs:
       # steps later cannot regress this into a hard failure.
       - name: Upload SBOM artefacts (linux)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: sbom-integration-linux-${{ github.sha }}
           path: |
@@ -835,7 +840,7 @@ jobs:
     needs: unit
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Install build deps and SBOM validators
         run: |
@@ -873,7 +878,7 @@ jobs:
       # Same `if: always()` rationale as the linux upload above.
       - name: Upload SBOM artefacts (macos)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: sbom-integration-macos-${{ github.sha }}
           path: |
@@ -895,7 +900,7 @@ jobs:
     needs: unit
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Install build deps + SBOM validators
         run: |
@@ -926,17 +931,18 @@ jobs:
           # bomsh has no releases; pin to last commit on main as of
           # 2024-10-31.  The patch itself last changed 2024-02-06.
           BOMSH_SHA: 5823f7db7e5bd958e4ff868ae6ea79a7d871bb07
-          # v6.7 (2024-01-29) is the strace release current when the
+          # strace v6.7 (2024-01-29) is the release current when the
           # patch was last touched; later releases tend to drift from
-          # the patch's context lines in src/strace.c.
-          STRACE_TAG: v6.7
+          # the patch's context lines in src/strace.c.  Pin to the exact
+          # commit the v6.7 tag resolves to so the input is immutable.
+          STRACE_SHA: 091ed4fda1f8ab86b79b52790d4ebc41c333bc49 # v6.7
         run: |
           # --filter=blob:none is the cleanest "shallow-ish" clone when
           # checking out a specific SHA: it skips file blobs but keeps
-          # the commit graph, so `git checkout $BOMSH_SHA` still works.
-          # `--depth=1` would only work with `--branch <ref>`, not a
-          # raw SHA.  The strace clone below uses `--depth=1 --branch`
-          # because it pins to a release tag.
+          # the commit graph, so `git checkout <SHA>` still works.  Both
+          # bomsh and strace are pinned to raw commit SHAs (a tag is
+          # mutable, a SHA is not), matching how this provenance workflow
+          # treats every other build input.
           git clone --filter=blob:none https://github.com/omnibor/bomsh /tmp/bomsh
           git -C /tmp/bomsh checkout "$BOMSH_SHA"
           # Even with a pinned SHA, keep the layout-drift guard so the
@@ -948,8 +954,9 @@ jobs:
               ls -la /tmp/bomsh/.devcontainer/ >&2 || true
               exit 1
           fi
-          git clone --depth=1 --branch "$STRACE_TAG" \
+          git clone --filter=blob:none \
               https://github.com/strace/strace.git /tmp/strace
+          git -C /tmp/strace checkout "$STRACE_SHA"
           cp /tmp/bomsh/.devcontainer/patches/bomtrace3.patch /tmp/strace/
           cp /tmp/bomsh/.devcontainer/src/*.[ch] /tmp/strace/src/
           (
@@ -1096,7 +1103,7 @@ jobs:
       #   wolfssl-*.cdx.json            - CycloneDX equivalent.
       - name: Upload OmniBOR graph + bomsh-enriched SBOMs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: bomsh-omnibor-${{ github.sha }}
           path: |
@@ -1112,7 +1119,7 @@ jobs:
         # provenance bundle above stays slim for downstream consumers
         # who don't need to debug ptrace gaps.
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: bomsh-trace-diag-${{ github.sha }}
           path: |

@@ -588,8 +588,8 @@ CLEANFILES += $(SBOM_CDX) $(SBOM_SPDX) $(SBOM_SPDX_TV)
 #         --vex-overlay advisories/vex-overlay.json \
 #         --out-dir advisories/out
 #
-# Inputs  (tracked in git): advisories/records/CVE-*.json + advisories/vex-overlay.json
-# Outputs (build artifacts): advisories/out/CVE-*.{csaf,cdx}.json
+# Inputs  (tracked in git): advisories/records/*.json + advisories/vex-overlay.json
+# Outputs (build artifacts): advisories/out/*.{csaf,cdx}.json
 ADVISORY_RECORDS_DIR = $(srcdir)/advisories/records
 ADVISORY_OVERLAY     = $(srcdir)/advisories/vex-overlay.json
 ADVISORY_OUT_DIR     = $(abs_builddir)/advisories/out
@@ -624,6 +624,7 @@ advisory:
 install-advisory: advisory
 	$(MKDIR_P) $(DESTDIR)$(advisorydir)
 	@for f in $(ADVISORY_OUT_DIR)/*.json; do \
+	    test -f "$$f" || continue; \
 	    echo " $(INSTALL_DATA) $$f $(DESTDIR)$(advisorydir)/"; \
 	    $(INSTALL_DATA) "$$f" $(DESTDIR)$(advisorydir)/; \
 	done
@@ -635,10 +636,19 @@ uninstall-advisory:
 CLEANFILES += advisories/out/*.csaf.json advisories/out/*.cdx.json
 
 # Ship the advisory generator inputs in the dist tarball so a downstream
-# consumer can `./configure && make advisory` from a release.
-EXTRA_DIST += advisories/records/CVE-2026-5501.json \
-              advisories/records/CVE-2026-5778.json \
-              advisories/vex-overlay.json
+# consumer can `./configure && make advisory` from a release.  The per-CVE
+# records are copied via dist-hook (glob) rather than listed in EXTRA_DIST so
+# a newly-added record ships automatically: a hardcoded list silently drops
+# new records from `make dist`, and the omission only surfaces as a failing
+# downstream `make advisory`.
+EXTRA_DIST += advisories/vex-overlay.json
+
+dist-hook:
+	$(MKDIR_P) $(distdir)/advisories/records
+	@for f in $(srcdir)/advisories/records/*.json; do \
+	    test -f "$$f" || continue; \
+	    cp -p "$$f" $(distdir)/advisories/records/; \
+	done
 
 # Bomsh (OmniBOR build artifact tracing + SBOM enrichment)
 BOMSH_RAWLOG_BASE      = $(abs_builddir)/bomsh_raw_logfile
@@ -735,4 +745,4 @@ CLEANFILES += $(BOMSH_RAWLOG) $(BOMSH_RAWLOG_BASE).sha256 $(BOMSH_CONF) $(BOMSH_
 # safe whether or not those targets were ever run.  Depending on them
 # rather than duplicating their bodies keeps the cleanup paths in lock
 # step with install-sbom/install-bomsh.
-uninstall-hook: uninstall-sbom uninstall-bomsh
+uninstall-hook: uninstall-sbom uninstall-bomsh uninstall-advisory

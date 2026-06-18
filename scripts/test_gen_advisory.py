@@ -207,8 +207,8 @@ class TestParseRecord(unittest.TestCase):
     def test_cvss_is_v4_and_no_csaf20_compatible_score(self):
         adv = _adv('CVE-2026-5501.json')
         self.assertEqual(adv['cvss']['csaf_key'], 'cvss_v4')
-        self.assertEqual(adv['cvss']['data']['baseSeverity'], 'HIGH')
-        self.assertEqual(adv['cvss']['data']['baseScore'], 8.6)
+        self.assertEqual(adv['cvss']['data']['baseSeverity'], 'CRITICAL')
+        self.assertEqual(adv['cvss']['data']['baseScore'], 9.3)
         # The record carries only CVSS v4, which CSAF 2.0 scores[] cannot hold.
         self.assertIsNone(adv['cvss_csaf'])
 
@@ -393,7 +393,7 @@ class TestGenerateCsaf(unittest.TestCase):
         titles = [n.get('title') for n in v['notes']]
         self.assertIn('CVSS v4.0', titles)
         note = [n for n in v['notes'] if n.get('title') == 'CVSS v4.0'][0]
-        self.assertIn('8.6', note['text'])
+        self.assertIn('9.3', note['text'])
 
     def test_cwe_uses_canonical_catalogue_name(self):
         v = [x for x in self.bundle['vulnerabilities']
@@ -425,9 +425,9 @@ class TestGenerateCsaf(unittest.TestCase):
         self.assertEqual(len(self.bundle['vulnerabilities']), 2)
         cves = {v['cve'] for v in self.bundle['vulnerabilities']}
         self.assertEqual(cves, {'CVE-2026-5501', 'CVE-2026-5778'})
-        # HIGH (5501) outranks LOW (5778).
+        # CRITICAL (5501) outranks HIGH (5778).
         self.assertEqual(self.bundle['document']['aggregate_severity']['text'],
-                         'HIGH')
+                         'CRITICAL')
 
     def test_hedge_note_present_for_sniffer_cve(self):
         v = [x for x in self.bundle['vulnerabilities']
@@ -514,7 +514,7 @@ class TestGenerateCdxVex(unittest.TestCase):
         self.assertEqual(v['analysis']['state'], 'exploitable')
         self.assertEqual(v['cwes'], [295])
         self.assertEqual(v['ratings'][0]['method'], 'CVSSv4')
-        self.assertEqual(v['ratings'][0]['severity'], 'high')
+        self.assertEqual(v['ratings'][0]['severity'], 'critical')
 
 
 # --------------------------------------------------------------------------- #
