@@ -960,10 +960,11 @@ class TestSrcsMerkleHash(unittest.TestCase):
         finally:
             shutil.rmtree(tmpdir)
 
-    def test_basename_only_means_path_independent(self):
-        """The Merkle hash deliberately uses basename only, not full
-        path, so two customers whose wolfSSL trees live at different
-        absolute paths get the same hash for the same release."""
+    def test_path_independent_across_trees(self):
+        """The Merkle key is each file's path relative to the common
+        ancestor of the input set, so two customers whose wolfSSL trees
+        live at different absolute paths get the same hash for the same
+        release (the absolute prefix is stripped)."""
         import shutil
         td_a, paths_a = self._make_files({'aes.c': b'aes', 'sha.c': b'sha'})
         td_b, paths_b = self._make_files({'aes.c': b'aes', 'sha.c': b'sha'})
@@ -975,6 +976,33 @@ class TestSrcsMerkleHash(unittest.TestCase):
             shutil.rmtree(td_a)
             shutil.rmtree(td_b)
 
+    def test_same_basename_different_subtrees_accepted(self):
+        """Projects like wolfsentry compile two files with the same
+        basename from different subtrees (src/wolfip/foo.c and
+        src/lwip/foo.c).  The relpath key distinguishes them, so both
+        are hashed and the set is accepted (a basename-only key would
+        reject or collide on this)."""
+        import shutil, tempfile
+        root = tempfile.mkdtemp()
+        try:
+            a_dir = os.path.join(root, 'wolfip')
+            b_dir = os.path.join(root, 'lwip')
+            os.makedirs(a_dir)
+            os.makedirs(b_dir)
+            a = os.path.join(a_dir, 'foo.c')
+            b = os.path.join(b_dir, 'foo.c')
+            with open(a, 'wb') as f:
+                f.write(b'wolfip-foo')
+            with open(b, 'wb') as f:
+                f.write(b'lwip-foo')
+            h_both = gs.srcs_merkle_hash([a, b])
+            # Distinct relpath keys -> dropping one changes the hash,
+            # proving both files actually contribute.
+            self.assertNotEqual(h_both, gs.srcs_merkle_hash([a]))
+            self.assertNotEqual(h_both, gs.srcs_merkle_hash([b]))
+        finally:
+            shutil.rmtree(root)
+
     def test_missing_file_exits_cleanly(self):
         # Mirrors TestGitoidBlobSha256.test_missing_file_exits_cleanly:
         # silently emitting an SBOM with a stale or zero hash for a
@@ -983,28 +1011,22 @@ class TestSrcsMerkleHash(unittest.TestCase):
         with self.assertRaises(SystemExit):
             gs.srcs_merkle_hash(['/no/such/source/please.c'])
 
-    def test_duplicate_basenames_rejected(self):
-        # Order independence relies on unique basenames - if two source
-        # files in the input collided on basename, sorting on basename
-        # would suppress one of them and we would silently lose data.
+    def test_duplicate_path_rejected(self):
+        # The relpath key is what makes the hash order-independent; if
+        # the same file is listed twice it collides on that key and
+        # sorting would suppress one entry, silently losing data.
         # gen-sbom must reject the configuration rather than emit a
         # misleading hash.
         import shutil, tempfile
-        td_a = tempfile.mkdtemp()
-        td_b = tempfile.mkdtemp()
+        td = tempfile.mkdtemp()
         try:
-            with open(os.path.join(td_a, 'aes.c'), 'wb') as f:
+            p = os.path.join(td, 'aes.c')
+            with open(p, 'wb') as f:
                 f.write(b'a')
-            with open(os.path.join(td_b, 'aes.c'), 'wb') as f:
-                f.write(b'b')
             with self.assertRaises(SystemExit):
-                gs.srcs_merkle_hash([
-                    os.path.join(td_a, 'aes.c'),
-                    os.path.join(td_b, 'aes.c'),
-                ])
+                gs.srcs_merkle_hash([p, p])
         finally:
-            shutil.rmtree(td_a)
-            shutil.rmtree(td_b)
+            shutil.rmtree(td)
 
 
 class TestParseUserSettings(unittest.TestCase):
@@ -1300,14 +1322,14 @@ class TestCliMutualExclusion(unittest.TestCase):
             '--lib', '/dev/null',
             '--srcs', '/dev/null')
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn('--lib or --srcs', result.stderr)
+        self.assertIn('exactly one of --lib, --srcs', result.stderr)
 
     def test_neither_lib_nor_srcs_fails(self):
         result = self._run(
             *self.BASE,
             '--options-h', '/dev/null')
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn('--lib or --srcs', result.stderr)
+        self.assertIn('exactly one of --lib, --srcs', result.stderr)
 
     def test_licenseref_without_license_text_is_rejected(self):
         # Hard contract enforced at gen-sbom main() (see gen-sbom:880):
@@ -1399,8 +1421,9 @@ class TestCliMutualExclusion(unittest.TestCase):
         with tempfile.NamedTemporaryFile('wb', suffix='.c',
                                          delete=False) as f:
             empty_src = f.name
-        # Rename so the basenames are distinct (srcs_merkle_hash
-        # rejects duplicate basenames; see TestSrcsMerkleHash).
+        # Rename so the paths are distinct (srcs_merkle_hash rejects a
+        # file listed twice under the same relpath key; see
+        # TestSrcsMerkleHash).
         # Rename and rebind BEFORE the try-block so the finally
         # clause always references the live filenames even when an
         # assertion fails.

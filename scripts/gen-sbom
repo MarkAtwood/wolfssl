@@ -558,36 +558,46 @@ def gitoid_blob_sha256(path):
 
 
 def srcs_merkle_hash(src_paths):
-    """Deterministic SHA-256 over a sorted list of (basename, gitoid)
+    """Deterministic SHA-256 over a sorted list of (relpath, gitoid)
     pairs for the given source files.
 
     Two customers compiling the same wolfSSL release with the same set
     of source files get identical hashes regardless of where their
     wolfSSL tree lives on disk, the order they passed --srcs, or the
-    filesystem they built on.  Sorting on basename only (not full path)
-    is what makes this true; collisions across basenames would matter
-    in theory but wolfSSL's source layout has unique basenames per file
-    by construction.
+    filesystem they built on.  The Merkle key is each file's path
+    relative to the common ancestor of all inputs (not just its
+    basename): projects such as wolfsentry legitimately compile two
+    files with the same basename from different subtrees
+    (src/wolfip/foo.c and src/lwip/foo.c), which a basename-only key
+    would reject or, worse, collide.  Keying on the common-prefix-
+    relative path keeps the hash location-independent (the absolute
+    prefix is stripped) while still distinguishing same-named files in
+    different directories.
 
     A one-byte change in any compiled-in source produces a different
     hash, which is the property that makes this useful as the SBOM
     component checksum for embedded builds with no separate library
     archive."""
-    seen = set()
+    abspaths = [os.path.abspath(p) for p in src_paths]
+    if len(abspaths) == 1:
+        prefix = os.path.dirname(abspaths[0])
+    else:
+        prefix = os.path.commonpath(abspaths)
+    seen = {}
     entries = []
-    for path in src_paths:
-        name = os.path.basename(path)
-        if name in seen:
+    for orig, ap in zip(src_paths, abspaths):
+        key = os.path.relpath(ap, prefix)
+        if key in seen:
             sys.exit(
-                f"ERROR: duplicate basename in --srcs: {name!r}\n"
-                f"       Source files must have unique basenames so the "
-                f"Merkle hash is order-independent.")
-        seen.add(name)
-        entries.append((name, gitoid_blob_sha256(path)))
+                f"ERROR: duplicate source path in --srcs: {key!r}\n"
+                f"       Resolved from {seen[key]!r} and {orig!r}; the same "
+                f"file was listed twice.")
+        seen[key] = orig
+        entries.append((key, gitoid_blob_sha256(orig)))
     entries.sort()
     h = hashlib.sha256()
-    for name, oid in entries:
-        h.update(f'{name}\x00{oid}\n'.encode())
+    for key, oid in entries:
+        h.update(f'{key}\x00{oid}\n'.encode())
     return h.hexdigest()
 
 
@@ -886,6 +896,17 @@ def main():
                              'OmniBOR-compatible gitoid Merkle hash is '
                              'used as the SBOM component checksum '
                              'instead of --lib.')
+    parser.add_argument('--srcs-file', metavar='PATH',
+                        help='File listing source .c paths to hash (one per '
+                             'line). Alternative to --srcs for large source '
+                             'lists that exceed ARG_MAX.')
+    parser.add_argument('--no-artifact-hash', action='store_true',
+                        help='Emit a structurally valid SBOM with a '
+                             'placeholder component checksum instead of '
+                             'hashing any library or source files. For '
+                             'customers under NDA who cannot share source '
+                             'lists. WARNING: not suitable for production '
+                             'compliance.')
     parser.add_argument('--dep-libz', default='no',
                         help='yes if built with --with-libz')
     parser.add_argument('--dep-liboqs', default='no',
@@ -926,12 +947,41 @@ def main():
             "       --user-settings: embedded entry point (path to "
             "wolfssl/wolfcrypt/settings.h, with --user-settings-include "
             "pointing at the directory containing user_settings.h).")
-    if bool(args.lib) == bool(args.srcs):
+    # --srcs-file avoids shell ARG_MAX limits on large source trees: read
+    # the paths from the file and populate args.srcs so all downstream code
+    # uses a single code path regardless of how the list was supplied.
+    if args.srcs and args.srcs_file:
+        sys.exit("ERROR: pass exactly one of --srcs or --srcs-file.")
+    if args.srcs_file:
+        try:
+            with open(args.srcs_file) as f:
+                args.srcs = [
+                    line for line in (raw.strip() for raw in f)
+                    if line and not line.startswith('#')
+                ]
+        except OSError as e:
+            sys.exit(f"ERROR: cannot read --srcs-file {args.srcs_file!r}: {e}")
+        if not args.srcs:
+            sys.exit(
+                f"ERROR: --srcs-file {args.srcs_file!r} contains no source "
+                "paths (after ignoring blank lines and # comments).")
+
+    # --no-artifact-hash for customers under NDA who cannot share source
+    # lists.  It is mutually exclusive with every checksum source.
+    if args.no_artifact_hash:
+        if args.lib or args.srcs:
+            sys.exit(
+                "ERROR: --no-artifact-hash is mutually exclusive with "
+                "--lib, --srcs and --srcs-file.")
+    elif bool(args.lib) == bool(args.srcs):
         sys.exit(
-            "ERROR: pass exactly one of --lib or --srcs.\n"
+            "ERROR: pass exactly one of --lib, --srcs, --srcs-file or "
+            "--no-artifact-hash.\n"
             "       --lib: hash a built library artefact (.so/.a/.dylib).\n"
-            "       --srcs: hash the wolfSSL source files compiled into "
-            "your firmware (OmniBOR gitoid Merkle hash).")
+            "       --srcs / --srcs-file: hash the wolfSSL source files "
+            "compiled into your firmware (OmniBOR gitoid Merkle hash).\n"
+            "       --no-artifact-hash: emit a placeholder checksum (NDA "
+            "customers who cannot share source lists).")
 
     # SPDX 2.3 §6.5 requires documentNamespace to be a unique absolute URI
     # per RFC 3986.  `make sbom` runs pyspdxtools afterwards and would
@@ -990,7 +1040,18 @@ def main():
             args.user_settings_define,
         )
 
-    if args.lib:
+    if args.no_artifact_hash:
+        # --no-artifact-hash for customers under NDA who cannot share source
+        # lists.  Emit the all-zero SHA-256 as an explicit "not provided"
+        # placeholder; the hash-kind property below tells auditors the
+        # checksum is intentionally absent rather than computed.
+        print(
+            "WARNING: SBOM artifact hash omitted; not suitable for "
+            "production compliance.", file=sys.stderr)
+        lib_hash = '0' * 64
+        hash_kind = 'none-placeholder'
+        srcs_basenames = None
+    elif args.lib:
         # Refuse the empty-file SHA-256 as a component checksum.  A
         # build that points --lib at /dev/null, a stub touch(1)'d
         # placeholder, or an empty .a that failed to ar-create would
