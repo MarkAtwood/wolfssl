@@ -69,7 +69,11 @@ That command produces the same two SBOM JSON files (CycloneDX 1.6 and SPDX
 | `--user-settings-include DIR` (repeatable) | Include path containing your `user_settings.h` and the wolfSSL tree | Same as the `-I` flags in your build |
 | `--user-settings-define NAME[=VALUE]` (repeatable) | Macros to predefine for preprocessing | Same as the `-D` flags in your build (at minimum: `-D WOLFSSL_USER_SETTINGS`) |
 | `--srcs PATH …` | wolfSSL source files compiled into your firmware | The same source list you pass to your compiler |
+| `--srcs-file PATH` | A file listing the wolfSSL source files, one per line (`#` comments and blank lines ignored) | Emitted mechanically by your IDE / build (link map, project export) when the list is too long for the command line |
 | `--cdx-out / --spdx-out` | Output paths for the SBOM JSON files | Anywhere you want |
+
+Exactly one component-checksum source is required: `--lib`, `--srcs` /
+`--srcs-file`, or `--no-artifact-hash` (see § 1.4).
 
 Optional flags:
 
@@ -81,6 +85,7 @@ Optional flags:
 | `--dep-version libz=1.3.1` | Explicit dep version when `pkg-config` is unavailable (typical cross-compile) |
 | `--license-override LicenseRef-wolfSSL-Commercial` | If you are a commercial licensee, not GPL |
 | `--license-text /path/to/commercial-license.txt` | Required when `--license-override` is a `LicenseRef-*` |
+| `--no-artifact-hash` | Record a placeholder checksum when **no** hashable artefact exists (ROM image, HSM firmware, binary-only redistribution).  Mutually exclusive with `--lib` / `--srcs` / `--srcs-file` (see § 1.4) |
 | `--document-namespace https://example.com/sbom/wolfssl-5.9.1.spdx.json` | Override the SPDX `documentNamespace`.  Default is a deterministic `urn:uuid:` derived from `--name`/`--version` (SPDX 2.3 §6.5 requires only uniqueness, not resolvability).  Set this when **your** distribution re-hosts the SBOM under a stable URL. |
 
 ### 1.3 Dependencies
@@ -126,13 +131,46 @@ The resulting hash:
 - interoperates with bomsh / OmniBOR tooling, which key off the same
   gitoid format.
 
-Each standalone SBOM is annotated with two extra properties so the
+Each standalone SBOM is annotated with extra properties so the
 checksum's semantics are unambiguous to downstream consumers:
 
 ```json
-{ "name": "wolfssl:sbom:hash-kind",  "value": "source-merkle-omnibor" },
-{ "name": "wolfssl:sbom:source-set", "value": "aes.c,dh.c,sha.c,sha256.c,..." }
+{ "name": "wolfssl:sbom:hash-kind",   "value": "source-merkle-omnibor" },
+{ "name": "wolfssl:sbom:hash-source", "value": "srcs" },
+{ "name": "wolfssl:sbom:source-set",  "value": "aes.c,dh.c,sha.c,sha256.c,..." }
 ```
+
+`wolfssl:sbom:hash-source` is the coarse, stable provenance tag that
+downstream tooling filters on — which **input** the checksum came from:
+
+| `hash-source` | Meaning |
+|---|---|
+| `lib` | SHA-256 of a built library archive (`--lib`) |
+| `srcs` | OmniBOR gitoid Merkle hash of the compiled source set (`--srcs` / `--srcs-file`) |
+| `none` | Placeholder; no hashable artefact was available (`--no-artifact-hash`) |
+
+`wolfssl:sbom:hash-kind` carries the finer implementation detail
+(`library-binary` vs `source-merkle-omnibor` vs `none`); `hash-source`
+is what an integrator keys on without needing to know the hashing
+internals.
+
+#### No hashable artefact (`--no-artifact-hash`)
+
+For ROM images, HSM firmware, or binary-only redistributions where
+neither a library archive nor the compiled source files are accessible,
+pass `--no-artifact-hash`.  The checksum field is then a synthetic
+64-zero placeholder (`0000…0000`), and the SBOM carries:
+
+```json
+{ "name": "wolfssl:sbom:hash-source",          "value": "none" },
+{ "name": "wolfssl:sbom:no-artifact-hash-note", "value": "No artefact hash was available …" }
+```
+
+The placeholder can never collide with a real SHA-256, and the note
+directs integrators to contact wolfSSL for an integrity-verification
+approach appropriate to their build.  Use this only as a last resort:
+a `srcs`-based hash is strongly preferred because it is independently
+verifiable against the public wolfSSL source tree.
 
 The autotools `make sbom` path keeps `wolfssl:sbom:hash-kind` implicit
 (equal to `library-binary`) so its output stays byte-identical to

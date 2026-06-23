@@ -13,6 +13,7 @@ integration tests in .github/workflows/sbom.yml.
 """
 
 import importlib.util
+import json
 import os
 import pathlib
 import re
@@ -1305,6 +1306,69 @@ class TestResolveDepVersionsSingleShot(unittest.TestCase):
             gs.pkgconfig_version = original
 
 
+class TestCollectSrcs(unittest.TestCase):
+    """_collect_srcs merges --srcs and --srcs-file into one ordered,
+    path-deduplicated list.  --srcs-file lets an IDE / build system feed
+    a mechanically-generated source list (the only way to get a truly
+    complete set) when it is too long for the command line."""
+
+    def _write(self, lines):
+        with tempfile.NamedTemporaryFile('w', suffix='.txt',
+                                         delete=False) as f:
+            f.write(lines)
+            return f.name
+
+    def test_srcs_only(self):
+        self.assertEqual(
+            gs._collect_srcs(['a.c', 'b.c'], None),
+            ['a.c', 'b.c'])
+
+    def test_srcs_file_only(self):
+        path = self._write('a.c\nb.c\n')
+        try:
+            self.assertEqual(gs._collect_srcs(None, path), ['a.c', 'b.c'])
+        finally:
+            os.unlink(path)
+
+    def test_blank_and_comment_lines_ignored(self):
+        path = self._write('# header\n\na.c\n  # indented comment\nb.c\n\n')
+        try:
+            self.assertEqual(gs._collect_srcs(None, path), ['a.c', 'b.c'])
+        finally:
+            os.unlink(path)
+
+    def test_srcs_and_file_merge_and_dedup_paths(self):
+        # A path appearing in both --srcs and --srcs-file collapses to one
+        # entry (first occurrence wins) so it does not later trip
+        # srcs_merkle_hash's duplicate-basename guard.
+        path = self._write('b.c\nc.c\n')
+        try:
+            self.assertEqual(
+                gs._collect_srcs(['a.c', 'b.c'], path),
+                ['a.c', 'b.c', 'c.c'])
+        finally:
+            os.unlink(path)
+
+    def test_whitespace_is_stripped(self):
+        path = self._write('  a.c  \n\tb.c\t\n')
+        try:
+            self.assertEqual(gs._collect_srcs(None, path), ['a.c', 'b.c'])
+        finally:
+            os.unlink(path)
+
+    def test_empty_result_exits(self):
+        path = self._write('# only comments\n\n')
+        try:
+            with self.assertRaises(SystemExit):
+                gs._collect_srcs(None, path)
+        finally:
+            os.unlink(path)
+
+    def test_unreadable_srcs_file_exits(self):
+        with self.assertRaises(SystemExit):
+            gs._collect_srcs(None, '/nonexistent/dir/does-not-exist.txt')
+
+
 class TestCliMutualExclusion(unittest.TestCase):
     """The two entry-point shapes (autotools / standalone) must be
     mutually exclusive.  Mixing them would produce a hash whose
@@ -1352,14 +1416,35 @@ class TestCliMutualExclusion(unittest.TestCase):
             '--lib', '/dev/null',
             '--srcs', '/dev/null')
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn('--lib or --srcs', result.stderr)
+        self.assertIn('component-checksum source', result.stderr)
 
     def test_neither_lib_nor_srcs_fails(self):
         result = self._run(
             *self.BASE,
             '--options-h', '/dev/null')
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn('--lib or --srcs', result.stderr)
+        self.assertIn('component-checksum source', result.stderr)
+
+    def test_no_artifact_hash_with_srcs_fails(self):
+        # --no-artifact-hash is the "no hashable artefact" escape hatch;
+        # combining it with a real hash source (--srcs here) is a
+        # contradiction the operator must resolve, so gen-sbom refuses it.
+        result = self._run(
+            *self.BASE,
+            '--options-h', '/dev/null',
+            '--no-artifact-hash',
+            '--srcs', '/dev/null')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('component-checksum source', result.stderr)
+
+    def test_no_artifact_hash_with_lib_fails(self):
+        result = self._run(
+            *self.BASE,
+            '--options-h', '/dev/null',
+            '--no-artifact-hash',
+            '--lib', '/dev/null')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('component-checksum source', result.stderr)
 
     def test_licenseref_without_license_text_is_rejected(self):
         # Hard contract enforced at gen-sbom main() (see gen-sbom:880):
@@ -1488,9 +1573,77 @@ class TestCliMutualExclusion(unittest.TestCase):
         result = self._run('--help')
         self.assertEqual(result.returncode, 0, result.stderr)
         for token in ('--user-settings', '--user-settings-include',
-                      '--user-settings-define', '--srcs',
-                      '--dep-version'):
+                      '--user-settings-define', '--srcs', '--srcs-file',
+                      '--no-artifact-hash', '--dep-version'):
             self.assertIn(token, result.stdout, f'{token!r} missing from --help')
+
+    def test_srcs_file_matches_srcs_for_same_list(self):
+        # --srcs-file is purely an input convenience: for the same set of
+        # files it must produce a byte-identical SBOM to passing the files
+        # via --srcs.  This pins that equivalence end-to-end so the two
+        # input paths can never silently diverge.
+        with tempfile.TemporaryDirectory() as tmp:
+            aes = os.path.join(tmp, 'aes.c')
+            sha = os.path.join(tmp, 'sha.c')
+            with open(aes, 'w') as f:
+                f.write('/* aes */\n')
+            with open(sha, 'w') as f:
+                f.write('/* sha */\n')
+            listfile = os.path.join(tmp, 'srcs.txt')
+            with open(listfile, 'w') as f:
+                f.write(f'# wolfssl sources\n{aes}\n\n{sha}\n')
+
+            cdx_a = os.path.join(tmp, 'a.cdx.json')
+            spdx_a = os.path.join(tmp, 'a.spdx.json')
+            cdx_b = os.path.join(tmp, 'b.cdx.json')
+            spdx_b = os.path.join(tmp, 'b.spdx.json')
+            common = [
+                '--name', 'wolfssl', '--version', '0.0.0-test',
+                '--license-file', '/dev/null',
+                '--user-settings', '/dev/null',
+            ]
+            env = dict(os.environ, SOURCE_DATE_EPOCH='1700000000')
+            import subprocess
+            here = pathlib.Path(__file__).resolve().parent
+            script = str(here / 'gen-sbom')
+            r1 = subprocess.run(
+                ['python3', script, *common, '--srcs', aes, sha,
+                 '--cdx-out', cdx_a, '--spdx-out', spdx_a],
+                capture_output=True, text=True, env=env)
+            r2 = subprocess.run(
+                ['python3', script, *common, '--srcs-file', listfile,
+                 '--cdx-out', cdx_b, '--spdx-out', spdx_b],
+                capture_output=True, text=True, env=env)
+            self.assertEqual(r1.returncode, 0, r1.stderr)
+            self.assertEqual(r2.returncode, 0, r2.stderr)
+            with open(cdx_a) as f:
+                a_cdx = f.read()
+            with open(cdx_b) as f:
+                b_cdx = f.read()
+            self.assertEqual(a_cdx, b_cdx)
+
+    def test_no_artifact_hash_emits_placeholder_and_note(self):
+        # End-to-end: --no-artifact-hash must produce a valid SBOM whose
+        # checksum is the synthetic 64-zero placeholder, tagged
+        # hash-source=none with the contact note, so the "no hashable
+        # artefact" path can never silently masquerade as a real digest.
+        with tempfile.TemporaryDirectory() as tmp:
+            cdx = os.path.join(tmp, 'out.cdx.json')
+            spdx = os.path.join(tmp, 'out.spdx.json')
+            result = self._run(
+                '--name', 'wolfssl', '--version', '0.0.0-test',
+                '--license-file', '/dev/null',
+                '--user-settings', '/dev/null',
+                '--no-artifact-hash',
+                '--cdx-out', cdx, '--spdx-out', spdx)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            with open(cdx) as f:
+                doc = json.load(f)
+            comp = doc['metadata']['component']
+            self.assertEqual(comp['hashes'][0]['content'], '0' * 64)
+            props = {p['name']: p['value'] for p in comp['properties']}
+            self.assertEqual(props['wolfssl:sbom:hash-source'], 'none')
+            self.assertIn('wolfssl:sbom:no-artifact-hash-note', props)
 
 
 # ---------------------------------------------------------------------------
@@ -1752,6 +1905,50 @@ class TestGenerateCdx(unittest.TestCase):
         # source-set is only meaningful for the merkle path.
         self.assertNotIn('wolfssl:sbom:source-set', props)
 
+    def test_hash_source_property_defaults_to_lib(self):
+        # hash-source is the coarse provenance tag downstream tooling
+        # filters on. The default (autotools / library-binary path) is
+        # 'lib'; pin it so a refactor of the default cannot silently
+        # mislabel the autotools SBOM.
+        doc = gs.generate_cdx(**self.BASE_KW)
+        props = {p['name']: p['value']
+                 for p in doc['metadata']['component']['properties']}
+        self.assertEqual(props['wolfssl:sbom:hash-source'], 'lib')
+        self.assertNotIn('wolfssl:sbom:no-artifact-hash-note', props)
+
+    def test_hash_source_srcs_for_source_set(self):
+        doc = gs.generate_cdx(**{
+            **self.BASE_KW,
+            'hash_kind': 'source-merkle-omnibor',
+            'hash_source': 'srcs',
+            'srcs_basenames': ['aes.c', 'sha.c'],
+        })
+        props = {p['name']: p['value']
+                 for p in doc['metadata']['component']['properties']}
+        self.assertEqual(props['wolfssl:sbom:hash-source'], 'srcs')
+        self.assertNotIn('wolfssl:sbom:no-artifact-hash-note', props)
+
+    def test_hash_source_none_carries_contact_note(self):
+        # The --no-artifact-hash path must flag the synthetic placeholder
+        # so a downstream auditor cannot mistake the 64-zero checksum for
+        # a genuine digest. Both the hash-source=none tag and the contact
+        # note are required.
+        doc = gs.generate_cdx(**{
+            **self.BASE_KW,
+            'lib_hash': gs._NO_HASH_SENTINEL,
+            'hash_kind': 'none',
+            'hash_source': 'none',
+        })
+        props = {p['name']: p['value']
+                 for p in doc['metadata']['component']['properties']}
+        self.assertEqual(props['wolfssl:sbom:hash-source'], 'none')
+        self.assertEqual(props['wolfssl:sbom:no-artifact-hash-note'],
+                         gs._NO_HASH_NOTE)
+        # The placeholder must be the synthetic 64-zero sentinel.
+        self.assertEqual(
+            doc['metadata']['component']['hashes'][0]['content'],
+            '0' * 64)
+
     def test_main_component_carries_security_external_refs(self):
         # An auditor reading the CDX needs a single in-document link
         # to the project's security advisories and the RFC 9116
@@ -1994,6 +2191,37 @@ class TestGenerateSpdx(unittest.TestCase):
                          ''.join(annotation_comments))
         # Comment is still build-config defines only.
         self.assertNotIn('hash-kind=', wolfssl_pkg['comment'])
+
+    def test_hash_source_annotation_defaults_to_lib(self):
+        doc = gs.generate_spdx(**self.BASE_KW)
+        wolfssl_pkg = next(
+            p for p in doc['packages']
+            if p['SPDXID'] == 'SPDXRef-Package-wolfssl')
+        comments = [a['comment'] for a in wolfssl_pkg['annotations']]
+        self.assertIn('wolfssl:sbom:hash-source=lib', comments)
+        self.assertNotIn('wolfssl:sbom:no-artifact-hash-note=',
+                         ''.join(comments))
+
+    def test_hash_source_none_annotates_contact_note(self):
+        # The --no-artifact-hash path must record both the hash-source=none
+        # tag and the contact note in the SPDX annotations[], mirroring the
+        # CycloneDX side, so neither format hides the synthetic placeholder.
+        doc = gs.generate_spdx(**{
+            **self.BASE_KW,
+            'lib_hash': gs._NO_HASH_SENTINEL,
+            'hash_kind': 'none',
+            'hash_source': 'none',
+        })
+        wolfssl_pkg = next(
+            p for p in doc['packages']
+            if p['SPDXID'] == 'SPDXRef-Package-wolfssl')
+        comments = [a['comment'] for a in wolfssl_pkg['annotations']]
+        self.assertIn('wolfssl:sbom:hash-source=none', comments)
+        self.assertIn(
+            f'wolfssl:sbom:no-artifact-hash-note={gs._NO_HASH_NOTE}',
+            comments)
+        self.assertEqual(
+            wolfssl_pkg['checksums'][0]['checksumValue'], '0' * 64)
 
     def test_file_entries_do_not_leak_into_spdx(self):
         # SPDX 2.3 forbids package elements (CONTAINS relationships

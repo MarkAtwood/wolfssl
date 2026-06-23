@@ -21,7 +21,23 @@ from datetime import datetime, timezone
 # fields.  Reproducibility CI keys on byte-equal SBOMs across re-runs,
 # so this constant must change in lockstep with the output it produces.
 GEN_SBOM_TOOL_NAME = 'wolfssl-sbom-gen'
-GEN_SBOM_VERSION = '1.1'
+GEN_SBOM_VERSION = '1.2'
+
+# Placeholder recorded in the component checksum fields when the operator
+# passes --no-artifact-hash: a build (ROM image, HSM firmware, binary-only
+# redistribution) where neither a library archive nor the compiled source
+# files are accessible to hash.  64 zero hex digits is an obviously-synthetic
+# SHA-256 that can never collide with a real artefact, and the companion
+# `wolfssl:sbom:hash-source=none` property plus the note below tell a
+# downstream auditor the value is intentional, not a generation bug.
+_NO_HASH_SENTINEL = '0' * 64
+_NO_HASH_NOTE = (
+    'No artefact hash was available at SBOM generation time '
+    '(--no-artifact-hash). The checksum field is a placeholder, not a real '
+    'SHA-256 of any wolfSSL component. Contact wolfssl@wolfssl.com to '
+    'arrange integrity verification appropriate to this build before relying '
+    'on this SBOM for CRA conformance.'
+)
 
 # Stable namespace for deterministic uuid5 derivation.  The seed string is
 # an opaque input to uuid5 -- it only needs to be (a) constant across
@@ -626,6 +642,53 @@ def srcs_merkle_hash(src_paths):
     return h.hexdigest()
 
 
+def _collect_srcs(srcs_args, srcs_file):
+    """Merge the --srcs list and the --srcs-file list into one ordered,
+    path-deduplicated list of source files.
+
+    --srcs-file is the file-driven companion to --srcs: one path per line,
+    with blank lines and `#` comment lines ignored.  It exists because an
+    embedded link line can run to hundreds of wolfSSL .c files -- more than
+    fits comfortably on a command line -- and because an IDE / build system
+    can emit such a list mechanically (from a link map or project export),
+    which is exactly how a *complete* source set should be produced rather
+    than hand-curated.
+
+    Identical paths appearing in both inputs are collapsed (first occurrence
+    wins) so that combining a base --srcs-file with a couple of extra --srcs
+    overrides does not trip srcs_merkle_hash's duplicate-basename guard on a
+    file the operator listed twice by accident.  Genuine distinct files that
+    share a basename are still rejected downstream -- that guard is what keeps
+    the Merkle hash order-independent.
+    """
+    paths = list(srcs_args or [])
+    if srcs_file:
+        try:
+            with open(srcs_file, 'r') as f:
+                raw_lines = f.read().splitlines()
+        except OSError as e:
+            sys.exit(f"ERROR: cannot read --srcs-file {srcs_file!r}: {e}")
+        for line in raw_lines:
+            stripped = line.strip()
+            if not stripped or stripped.startswith('#'):
+                continue
+            paths.append(stripped)
+
+    seen = set()
+    deduped = []
+    for p in paths:
+        if p not in seen:
+            seen.add(p)
+            deduped.append(p)
+
+    if not deduped:
+        sys.exit(
+            "ERROR: --srcs / --srcs-file produced an empty source list.\n"
+            "       Pass at least one wolfSSL .c file, or use "
+            "--no-artifact-hash if no hashable artefact exists.")
+    return deduped
+
+
 def cdx_dep_component(name, pkg_version, key, dep_version_overrides=None):
     """Return (bom_ref, component_dict) for a CDX dependency component.
     bom_ref is deterministic for reproducibility."""
@@ -677,7 +740,7 @@ def spdx_dep_package(key, dep_version_overrides=None):
 def generate_cdx(name, version, supplier, license_id, license_text, lib_hash,
                  timestamp, year, serial, enabled_deps, build_props,
                  dep_version_overrides=None, hash_kind='library-binary',
-                 srcs_basenames=None, file_entries=None):
+                 hash_source='lib', srcs_basenames=None, file_entries=None):
     bom_ref = derived_uuid(name, version, 'package')
 
     dep_bom_refs = []
@@ -699,6 +762,18 @@ def generate_cdx(name, version, supplier, license_id, license_text, lib_hash,
     # a single property lookup.
     properties.append(
         {'name': 'wolfssl:sbom:hash-kind', 'value': hash_kind})
+    # hash-source is the coarse, stable provenance tag downstream tooling
+    # keys on: which *input* the checksum came from -- 'lib' (library
+    # archive), 'srcs' (compiled source set), or 'none' (no hashable
+    # artefact).  hash-kind above carries the finer implementation detail
+    # (e.g. source-merkle-omnibor); hash-source is the value an integrator
+    # filters on without needing to know our hashing internals.
+    properties.append(
+        {'name': 'wolfssl:sbom:hash-source', 'value': hash_source})
+    if hash_source == 'none':
+        properties.append(
+            {'name': 'wolfssl:sbom:no-artifact-hash-note',
+             'value': _NO_HASH_NOTE})
     if srcs_basenames:
         properties.append({
             'name': 'wolfssl:sbom:source-set',
@@ -777,8 +852,8 @@ def generate_cdx(name, version, supplier, license_id, license_text, lib_hash,
 def generate_spdx(name, version, supplier, license_id, license_text, lib_hash,
                   timestamp, year, doc_ns_uuid, enabled_deps, build_props,
                   dep_version_overrides=None, hash_kind='library-binary',
-                  srcs_basenames=None, document_namespace=None,
-                  file_entries=None):
+                  hash_source='lib', srcs_basenames=None,
+                  document_namespace=None, file_entries=None):
     build_defines = ', '.join(k for k, _ in build_props)
     # Hash-kind / source-set / bomsh-traced-binary information used to
     # be stuffed into the package `comment` as `key=value` slugs, which
@@ -803,6 +878,9 @@ def generate_spdx(name, version, supplier, license_id, license_text, lib_hash,
         })
 
     _annotate(f'wolfssl:sbom:hash-kind={hash_kind}')
+    _annotate(f'wolfssl:sbom:hash-source={hash_source}')
+    if hash_source == 'none':
+        _annotate(f'wolfssl:sbom:no-artifact-hash-note={_NO_HASH_NOTE}')
     if srcs_basenames:
         _annotate('wolfssl:sbom:source-set=' + ','.join(srcs_basenames))
 
@@ -1005,7 +1083,25 @@ def main():
                              'firmware (embedded entry point).  Their '
                              'OmniBOR-compatible gitoid Merkle hash is '
                              'used as the SBOM component checksum '
-                             'instead of --lib.')
+                             'instead of --lib.  May be combined with '
+                             '--srcs-file.')
+    parser.add_argument('--srcs-file', default=None, metavar='PATH',
+                        help='Path to a file listing wolfSSL source files, '
+                             'one per line (blank lines and lines starting '
+                             'with `#` are ignored).  The file-driven '
+                             'companion to --srcs for link lines too long '
+                             'for the command line, or lists emitted '
+                             'mechanically by an IDE / build system (link '
+                             'map, project export).  Merged with --srcs and '
+                             'hashed the same way.')
+    parser.add_argument('--no-artifact-hash', action='store_true',
+                        help='Record a placeholder component checksum when '
+                             'no hashable artefact exists (ROM image, HSM '
+                             'firmware, binary-only redistribution).  Emits '
+                             'wolfssl:sbom:hash-source=none and a note '
+                             'directing integrators to contact wolfSSL.  '
+                             'Mutually exclusive with --lib / --srcs / '
+                             '--srcs-file.')
     parser.add_argument('--dep-libz', default='no',
                         help='yes if built with --with-libz')
     parser.add_argument('--dep-liboqs', default='no',
@@ -1046,12 +1142,16 @@ def main():
             "       --user-settings: embedded entry point (path to "
             "wolfssl/wolfcrypt/settings.h, with --user-settings-include "
             "pointing at the directory containing user_settings.h).")
-    if bool(args.lib) == bool(args.srcs):
+    srcs_provided = bool(args.srcs) or bool(args.srcs_file)
+    hash_sources = [bool(args.lib), srcs_provided, bool(args.no_artifact_hash)]
+    if sum(hash_sources) != 1:
         sys.exit(
-            "ERROR: pass exactly one of --lib or --srcs.\n"
+            "ERROR: pass exactly one component-checksum source.\n"
             "       --lib: hash a built library artefact (.so/.a/.dylib).\n"
-            "       --srcs: hash the wolfSSL source files compiled into "
-            "your firmware (OmniBOR gitoid Merkle hash).")
+            "       --srcs / --srcs-file: hash the wolfSSL source files "
+            "compiled into your firmware (OmniBOR gitoid Merkle hash).\n"
+            "       --no-artifact-hash: record a placeholder when no "
+            "hashable artefact exists (ROM/HSM/binary-only).")
 
     # SPDX 2.3 §6.5 requires documentNamespace to be a unique absolute URI
     # per RFC 3986.  `make sbom` runs pyspdxtools afterwards and would
@@ -1134,6 +1234,7 @@ def main():
                 "real library artefact.")
         lib_sha1, lib_hash = sha1_sha256_file(args.lib)
         hash_kind = 'library-binary'
+        hash_source = 'lib'
         srcs_basenames = None
         # Single SPDX file entry / CycloneDX file sub-component for
         # the linked library, so the SBOM names the artefact whose
@@ -1146,14 +1247,31 @@ def main():
             'sha1': lib_sha1,
             'sha256': lib_hash,
         }]
+    elif args.no_artifact_hash:
+        # No hashable artefact available (ROM image, HSM firmware,
+        # binary-only redistribution).  Record an obviously-synthetic
+        # placeholder rather than a real SHA-256, flagged by both the
+        # hash-source property and the contact note so a downstream
+        # auditor cannot mistake it for a genuine artefact digest.
+        print(
+            "NOTE: --no-artifact-hash: recording a placeholder component "
+            "checksum (no library or source set to hash). Contact "
+            "wolfssl@wolfssl.com for integrity verification options.",
+            file=sys.stderr)
+        lib_hash = _NO_HASH_SENTINEL
+        hash_kind = 'none'
+        hash_source = 'none'
+        srcs_basenames = None
     else:
-        # --srcs is the embedded entry point.  Zero-byte files in the
-        # set are uncommon but not necessarily wrong (a cross-compile
-        # toolchain may stub a per-target source with touch); warn
-        # rather than fail so the customer can decide whether the
-        # gitoid for an empty blob is what they want recorded.
+        # --srcs / --srcs-file is the embedded entry point.  Zero-byte
+        # files in the set are uncommon but not necessarily wrong (a
+        # cross-compile toolchain may stub a per-target source with
+        # touch); warn rather than fail so the customer can decide
+        # whether the gitoid for an empty blob is what they want
+        # recorded.
+        srcs = _collect_srcs(args.srcs, args.srcs_file)
         zero_byte_srcs = [
-            p for p in args.srcs if os.path.isfile(p) and os.path.getsize(p) == 0
+            p for p in srcs if os.path.isfile(p) and os.path.getsize(p) == 0
         ]
         if zero_byte_srcs:
             print(
@@ -1161,9 +1279,10 @@ def main():
                 "be the well-known empty-blob hash for these): "
                 + ', '.join(zero_byte_srcs),
                 file=sys.stderr)
-        lib_hash = srcs_merkle_hash(args.srcs)
+        lib_hash = srcs_merkle_hash(srcs)
         hash_kind = 'source-merkle-omnibor'
-        srcs_basenames = sorted({os.path.basename(p) for p in args.srcs})
+        hash_source = 'srcs'
+        srcs_basenames = sorted({os.path.basename(p) for p in srcs})
 
     dt, timestamp = build_timestamp()
     year = dt.year
@@ -1175,7 +1294,8 @@ def main():
         license_id, license_text, lib_hash, timestamp, year, serial,
         enabled_deps, build_props,
         dep_version_overrides=dep_version_overrides,
-        hash_kind=hash_kind, srcs_basenames=srcs_basenames,
+        hash_kind=hash_kind, hash_source=hash_source,
+        srcs_basenames=srcs_basenames,
         file_entries=file_entries,
     )
     spdx = generate_spdx(
@@ -1183,7 +1303,8 @@ def main():
         license_id, license_text, lib_hash, timestamp, year, doc_ns_uuid,
         enabled_deps, build_props,
         dep_version_overrides=dep_version_overrides,
-        hash_kind=hash_kind, srcs_basenames=srcs_basenames,
+        hash_kind=hash_kind, hash_source=hash_source,
+        srcs_basenames=srcs_basenames,
         document_namespace=(args.document_namespace or None),
         file_entries=file_entries,
     )
