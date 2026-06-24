@@ -258,3 +258,22 @@ The script stages a `make install` into a temporary directory, hashes the
 installed library, generates both SBOM formats, then removes the staging
 directory.  The `pyspdxtools` validation and conversion step runs after
 generation and gates the build on SPDX conformance.
+
+## SBOM Support Across the wolfSSL Product Family
+
+All major wolfSSL-family products support `make sbom`. Each product's SBOM
+requires `WOLFSSL_DIR` pointing to a wolfssl source tree with `scripts/gen-sbom`.
+
+| Product | Repo | Invocation | Artifact hash | Notes |
+|---------|------|------------|---------------|-------|
+| wolfSSL | [wolfSSL/wolfssl](https://github.com/wolfSSL/wolfssl) | `make sbom` | `--lib` (libwolfssl.so) | Canonical; gen-sbom lives here |
+| wolfSSH | [wolfSSL/wolfssh](https://github.com/wolfSSL/wolfssh) | `make sbom WOLFSSL_DIR=...` | `--lib` (libwolfssh.so) | |
+| wolfTPM | [wolfSSL/wolfTPM](https://github.com/wolfSSL/wolfTPM) | `make sbom WOLFSSL_DIR=...` | `--lib` (libwolftpm.so) | |
+| wolfMQTT | [wolfSSL/wolfMQTT](https://github.com/wolfSSL/wolfMQTT) | `make sbom WOLFSSL_DIR=...` | `--lib` (libwolfmqtt.so) | |
+| wolfsentry | [wolfSSL/wolfsentry](https://github.com/wolfSSL/wolfsentry) | `make sbom WOLFSSL_DIR=...` | `--lib` (libwolfsentry.so) | Autotools only |
+| wolfBoot | [wolfSSL/wolfBoot](https://github.com/wolfSSL/wolfBoot) | `make sbom TARGET=... SIGN=... HASH=...` | `--srcs` (compiled .c files) | Bootloader; no .so; gen-sbom in lib/wolfssl submodule |
+| wolfHSM | [wolfSSL/wolfHSM](https://github.com/wolfSSL/wolfHSM) | `python3 $WOLFSSL_DIR/scripts/gen-sbom --srcs src/*.c ...` | `--srcs` | No autotools/cmake; invoke gen-sbom directly |
+| wolfEngine | [wolfSSL/wolfEngine](https://github.com/wolfSSL/wolfEngine) | `make sbom WOLFSSL_DIR=...` | `--lib` (libwolfengine.so) | SONAME discovered dynamically; uses wolfssl options.h |
+| wolfProvider | [wolfSSL/wolfProvider](https://github.com/wolfSSL/wolfProvider) | `make sbom WOLFSSL_DIR=...` | `--lib` (libwolfprov.so.0.0.0) | Product name is `wolfprov`; SONAME ≠ package version |
+| wolfSCEP | [wolfSSL/wolfscep](https://github.com/wolfSSL/wolfscep) | `make sbom WOLFSSL_DIR=...` | `--lib` (libwolfscep.so) | |
+| wolfCLU | [wolfSSL/wolfCLU](https://github.com/wolfSSL/wolfCLU) | `make sbom WOLFSSL_DIR=...` | `--srcs` (wolfssl_SOURCES) | Binary (`wolfssl`), not a library |
