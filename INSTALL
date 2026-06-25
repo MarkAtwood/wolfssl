@@ -428,3 +428,49 @@ We also have vcpkg ports for wolftpm, wolfmqtt and curl.
     The generated files are removed by make clean.
 
     See doc/SBOM.md for full details.
+
+21. Generating security advisories (CSAF 2.0 + CycloneDX VEX)
+
+    wolfSSL can generate machine-readable security advisories from a
+    canonical, git-tracked single source of truth.  Each CVE record
+    produces one CSAF 2.0 document and one CycloneDX 1.6 VEX document,
+    suitable for downstream vulnerability tooling and CRA reporting.
+
+    Prerequisites:
+      - python3 (detected automatically by configure)
+
+    Usage:
+
+      $ ./configure
+      $ make advisory
+
+    Inputs (tracked in git):
+
+      advisories/records/*.json    one JSON record per CVE
+      advisories/vex-overlay.json  shared VEX overlay metadata
+
+    Outputs (build artifacts, one pair per record):
+
+      advisories/out/*.csaf.json   CSAF 2.0 JSON
+      advisories/out/*.cdx.json    CycloneDX 1.6 VEX JSON
+
+    Output is reproducible: SOURCE_DATE_EPOCH is honored and defaults to
+    the last git commit timestamp when unset, exactly like make sbom.
+
+    `make advisory` is a thin wrapper around scripts/gen-advisory and is
+    byte-for-byte interchangeable with running that script by hand:
+
+      $ python3 scripts/gen-advisory \
+          --records-dir advisories/records \
+          --vex-overlay advisories/vex-overlay.json \
+          --out-dir advisories/out
+
+    To install the advisory files to $(datadir)/doc/wolfssl/advisories/:
+
+      $ make install-advisory
+
+    To remove installed advisory files:
+
+      $ make uninstall-advisory
+
+    The generated files are removed by make clean.

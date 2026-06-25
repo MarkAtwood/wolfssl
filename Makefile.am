@@ -695,7 +695,8 @@ bomsh:
 	@printf 'raw_logfile=%s\n' '$(BOMSH_RAWLOG_BASE)' > '$(BOMSH_CONF)'
 	$(BOMTRACE3) -c '$(BOMSH_CONF)' $(MAKE)
 	$(BOMSH_CREATE_BOM) -r '$(BOMSH_RAWLOG)' -b '$(BOMSH_OMNIBORDIR)'
-	@bomsh_artifact=""; \
+	@set -e; \
+	bomsh_artifact=""; \
 	for lib in \
 	    $(addprefix "$(abs_builddir)/src/.libs"/,$(WOLFSSL_LIB_DSO_BASENAMES)) \
 	    "$(abs_builddir)/src/.libs/libwolfssl.a" \

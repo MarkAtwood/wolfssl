@@ -60,6 +60,14 @@ wolfSSL supports generating an OmniBOR artifact dependency graph via
 library back to every source file that produced it. See `doc/SBOM.md`
 for details.
 
+## Security advisories (CSAF / VEX)
+
+wolfSSL can generate machine-readable security advisories via
+`make advisory` (requires `python3`), emitting one CSAF 2.0 document
+and one CycloneDX 1.6 VEX document per CVE into `advisories/out/`
+(`*.csaf.json` and `*.cdx.json`) from the git-tracked records under
+`advisories/`. See section 21 of `INSTALL` for details.
+
 ## Notes, Please Read
 
 ### Note 1
