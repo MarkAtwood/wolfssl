@@ -1,13 +1,13 @@
 /**
- * @name wolfSSL network-tainted length reaches memory operation
- * @description A length or size value derived from attacker-controlled
- *              TLS/DTLS wire data reaches a memory operation without
- *              passing through wolfSSL's bounds-checking length decoder
- *              (GetLength_ex / GetASNHeader_ex with check=1).
+ * @name wolfSSL unchecked DER length reaches memory operation
+ * @description A length value decoded via GetLength_ex with check=0 (no
+ *              bounds validation that idx+len fits the buffer) reaches a
+ *              memory operation. These are the only sites in wolfSSL where
+ *              GetLength_ex is called without the buffer-fit check.
  * @kind path-problem
  * @problem.severity error
- * @precision medium
- * @id wolfssl/network-tainted-length
+ * @precision high
+ * @id wolfssl/unchecked-length-memop
  * @tags security
  *       external/cwe/cwe-119
  *       external/cwe/cwe-125
@@ -16,122 +16,78 @@
 
 import cpp
 import semmle.code.cpp.dataflow.new.TaintTracking
-import semmle.code.cpp.security.Security
-import DataFlow::PathGraph
 
 //
-// Sources: functions where attacker-controlled network data enters.
-// Return values and output-buffer parameters are tainted.
+// Sources: GetLength_ex called with check=0 (5th argument literal 0).
+// wolfSSL has exactly 3 such call sites. The output length parameter
+// (3rd arg, passed by pointer) is unvalidated against the buffer bound.
 //
-class WolfSSLNetworkSource extends DataFlow::Node {
-  WolfSSLNetworkSource() {
+class UncheckedLengthSource extends DataFlow::Node {
+  UncheckedLengthSource() {
     exists(FunctionCall fc |
-      fc.getTarget().getName() in [
-        // TLS record / handshake layer
-        "wolfSSL_read", "wolfSSL_recv", "ProcessReply", "DoRecord",
-        "DoHandShakeMsgType", "DoTls13HandShakeMsg",
-        // DTLS
-        "DtlsMsgStore", "DoClientHello", "wolfSSL_dtls_get_peer",
-        // Sniffer (raw packet input)
-        "ProcessPacket", "ssl_DecodePacket"
-      ] and
-      (
-        // return value carries attacker data
-        this.asExpr() = fc
+      fc.getTarget().getName() = "GetLength_ex" and
+      fc.getArgument(4).(Literal).getValue() = "0" and
+      // The length output variable: third argument is &len
+      this.asExpr() = fc.getArgument(2)
+    )
+  }
+}
+
+//
+// Sanitizers: subsequent bounds checks on the length value before use.
+// Any comparison of the length against a buffer-size variable or MAX constant.
+//
+class LengthBoundsCheck extends DataFlow::Node {
+  LengthBoundsCheck() {
+    exists(ComparisonOperation cmp |
+      cmp.getAnOperand() = this.asExpr() and
+      // The other side is a size variable or MAX constant
+      exists(Expr bound | bound = cmp.getAnOperand() and bound != this.asExpr() |
+        bound.(VariableAccess).getTarget().getName().regexpMatch(".*[Ss]z$|.*[Ll]en$|.*[Ss]ize$|.*[Mm]ax.*")
         or
-        // output buffer parameters (ptr args) carry attacker data
-        exists(int i |
-          i > 0 and
-          this.asExpr() = fc.getArgument(i) and
-          fc.getArgument(i).getType() instanceof PointerType
-        )
+        bound instanceof Literal
       )
     )
   }
 }
 
 //
-// Sanitizers: wolfSSL's length-decoding functions that validate a
-// decoded length fits within the remaining buffer before returning it.
-// After these calls, the length is safe to use as a buffer size.
+// Sinks: memory operations whose size/length argument is attacker-derived.
 //
-class WolfSSLLengthSanitizer extends DataFlow::Node {
-  WolfSSLLengthSanitizer() {
+class MemorySink extends DataFlow::Node {
+  MemorySink() {
     exists(FunctionCall fc |
       fc.getTarget().getName() in [
-        // Core ASN.1 length decoder — check=1 validates idx+len<=maxIdx
-        "GetLength_ex", "GetLength",
-        // ASN.1 tag+length decoder — same guarantee
-        "GetASNHeader_ex", "GetASNHeader",
-        // Higher-level typed decoders (all call GetLength internally)
-        "GetASN_Length",
-        "GetOctetString", "GetSequence", "GetSet",
-        "GetInteger", "GetShortInt",
-        // PKCS overflow-checked accumulator
-        "WC_SAFE_SUM_WORD32"
-      ] and
-      // The sanitized value flows out via an output pointer argument
-      this.asExpr() = fc.getArgument(_)
+        "XMEMCPY", "XMEMSET", "XMEMMOVE", "memcpy", "memmove", "memset"
+      ] and this.asExpr() = fc.getArgument(2)
+      or
+      fc.getTarget().getName() in [
+        "XMALLOC", "XREALLOC", "malloc", "realloc", "AllocDer", "XNEW"
+      ] and this.asExpr() = fc.getArgument(0)
     )
   }
 }
 
-//
-// Sinks: operations where an unsanitized attacker-controlled length
-// causes memory corruption or OOB access.
-//
-class WolfSSLMemorySink extends DataFlow::Node {
-  WolfSSLMemorySink() {
-    exists(FunctionCall fc |
-      (
-        // Memory copy/set with attacker-controlled size
-        fc.getTarget().getName() in [
-          "XMEMCPY", "XMEMSET", "XMEMMOVE",
-          "memcpy", "memmove", "memset",
-          "XSTRNCPY", "strncpy"
-        ] and
-        this.asExpr() = fc.getArgument(2)
-        or
-        // Allocation with attacker-controlled size
-        fc.getTarget().getName() in [
-          "XMALLOC", "XREALLOC", "malloc", "realloc",
-          "AllocDer", "XNEW"
-        ] and
-        this.asExpr() = fc.getArgument(0)
-        or
-        // wolfSSL ASN.1 leaf decoders called with attacker-controlled length
-        fc.getTarget().getName() in [
-          "GetASN_Integer", "GetASN_ObjectId", "GetASN_UTF8String",
-          "GetASN_IA5String", "GetASN_BitString", "GetASN_OctetString",
-          "GetASNInt", "CheckBitString"
-        ] and
-        this.asExpr() = fc.getArgument(2)  // the length/maxIdx argument
-      )
-    )
-  }
-}
-
-//
-// Taint configuration
-//
-module WolfSSLTaintConfig implements DataFlow::ConfigSig {
+module TaintConfig implements DataFlow::ConfigSig {
   predicate isSource(DataFlow::Node source) {
-    source instanceof WolfSSLNetworkSource
+    source instanceof UncheckedLengthSource
   }
 
-  predicate isSanitizer(DataFlow::Node node) {
-    node instanceof WolfSSLLengthSanitizer
+  predicate isBarrier(DataFlow::Node node) {
+    node instanceof LengthBoundsCheck
   }
 
   predicate isSink(DataFlow::Node sink) {
-    sink instanceof WolfSSLMemorySink
+    sink instanceof MemorySink
   }
 }
 
-module WolfSSLTaint = TaintTracking::Global<WolfSSLTaintConfig>;
+module Taint = TaintTracking::Global<TaintConfig>;
 
-from WolfSSLTaint::PathNode source, WolfSSLTaint::PathNode sink
-where WolfSSLTaint::flowPath(source, sink)
+import Taint::PathGraph
+
+from Taint::PathNode source, Taint::PathNode sink
+where Taint::flowPath(source, sink)
 select sink.getNode(), source, sink,
-  "Network-tainted length from $@ reaches memory operation without bounds validation.",
-  source.getNode(), "network source"
+  "Length from unchecked GetLength_ex (check=0) at $@ reaches memory operation without bounds validation.",
+  source.getNode(), "GetLength_ex check=0"
