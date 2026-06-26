@@ -15,14 +15,28 @@
  *                  word32 end = offset + size;      // wraps if offset near UINT32_MAX
  *                  if (end > bufferLen) error;      // guard defeated by wrap
  *
- *              Confirmed instance: DtlsMsgSet internal.c ~line 9938
- *              (fragOffset + fragSz — bounded by 24-bit wire format, so not
- *              exploitable there, but the shape is the same as the risky pattern).
+ *              Deeply audited findings (all confirmed false positives):
  *
- *              Triage priority: focus on pkcs7.c and asn.c sites where length
- *              values can reach INT_MAX via GetLength_ex(check=0). DTLS fragment
- *              field sums are bounded by the 24-bit wire format (max 33 MB).
- *              Timestamp arithmetic (bornOn + timeout) is also low priority.
+ *              pkcs7.c:15975 (totalRd + encryptedContentSz < maxLen):
+ *                Overflow requires 2 GB of PKCS7 header bytes before the
+ *                encrypted content block — structurally impossible. Even if
+ *                triggered, consequence is a logic error in optional attribute
+ *                parsing, not memory corruption (alloc/copy uses WC_SAFE_SUM_WORD32).
+ *
+ *              tls.c:2753-2839 (offset + len* in TLSX_SNI_GetFromBuffer):
+ *                Max reachable sum is ~200 KB. TLS record layer enforces
+ *                MAX_RECORD_SIZE (16 KB) before this code runs. Public API
+ *                could receive a crafted 4 GB buffer, but that requires the
+ *                caller to allocate 4 GB contiguously — not a realistic threat.
+ *
+ *              tls13.c:14039 (inputLength + pendingMsgOffset):
+ *                inputLength bounded by MAX_RECORD_SIZE (~16 KB);
+ *                pendingMsgOffset bounded by MAX_HANDSHAKE_SZ (~74 KB).
+ *                Maximum sum ~90 KB — 47,000x below the 4.3 GB overflow threshold.
+ *
+ *              triage notes: DTLS fragment sums are bounded by 24-bit wire
+ *              format (max 33 MB each). Timestamp bornOn+timeout arithmetic
+ *              wraps after ~136 years — low priority.
  *
  *              Not all results are bugs — this is an audit tool.
  *
