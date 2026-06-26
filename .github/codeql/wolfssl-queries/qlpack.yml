@@ -1,0 +1,6 @@
+name: wolfssl-security-queries
+version: 0.1.0
+description: wolfSSL-specific taint tracking queries
+license: GPL-2.0-only
+dependencies:
+  codeql/cpp-all: "*"

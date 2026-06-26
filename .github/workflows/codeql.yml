@@ -1,0 +1,54 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+  schedule:
+    - cron: '0 6 * * 1'
+
+jobs:
+  analyze:
+    name: Analyze (C/C++)
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: sudo apt-get install -y autoconf automake libtool
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: c-cpp
+          queries: security-extended
+          config: |
+            query-filters:
+              - exclude:
+                  tags contain: experimental
+            paths-ignore:
+              - 'IDE/**'
+              - 'wrapper/**'
+              - 'examples/**'
+              - 'tests/**'
+            additional-queries:
+              - .github/codeql/wolfssl-queries
+
+      - name: Build wolfSSL
+        run: |
+          ./autogen.sh
+          ./configure --enable-all
+          make -j$(nproc)
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: wolfssl-c
+          upload: true
