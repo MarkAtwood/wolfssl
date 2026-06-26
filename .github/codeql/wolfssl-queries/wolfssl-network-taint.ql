@@ -1,12 +1,13 @@
 /**
  * @name wolfSSL unchecked DER length reaches memory operation
  * @description A length value decoded via GetLength_ex with check=0 (no
- *              bounds validation that idx+len fits the buffer) reaches a
- *              memory operation. These are the only sites in wolfSSL where
- *              GetLength_ex is called without the buffer-fit check.
+ *              bounds validation that idx+len <= maxIdx) reaches a memory
+ *              operation. Includes sites using the NO_USER_CHECK macro (= 0).
+ *              Most PKCS7 streaming sites are intentional; focus on paths
+ *              that reach allocation or copy outside wc_PKCS7_GrowStream.
  * @kind path-problem
  * @problem.severity error
- * @precision high
+ * @precision medium
  * @id wolfssl/unchecked-length-memop
  * @tags security
  *       external/cwe/cwe-119
@@ -18,41 +19,22 @@ import cpp
 import semmle.code.cpp.dataflow.new.TaintTracking
 
 //
-// Sources: GetLength_ex called with check=0 (5th argument literal 0).
-// wolfSSL has exactly 3 such call sites. The output length parameter
-// (3rd arg, passed by pointer) is unvalidated against the buffer bound.
+// Source: the output-parameter address-of expression (&len / &objSz) passed
+// to GetLength_ex with check=0. CodeQL will then propagate taint through the
+// pointer into the dereferenced variable via isAdditionalTaintStep below.
 //
 class UncheckedLengthSource extends DataFlow::Node {
   UncheckedLengthSource() {
     exists(FunctionCall fc |
       fc.getTarget().getName() = "GetLength_ex" and
       fc.getArgument(4).(Literal).getValue() = "0" and
-      // The length output variable: third argument is &len
       this.asExpr() = fc.getArgument(2)
     )
   }
 }
 
 //
-// Sanitizers: subsequent bounds checks on the length value before use.
-// Any comparison of the length against a buffer-size variable or MAX constant.
-//
-class LengthBoundsCheck extends DataFlow::Node {
-  LengthBoundsCheck() {
-    exists(ComparisonOperation cmp |
-      cmp.getAnOperand() = this.asExpr() and
-      // The other side is a size variable or MAX constant
-      exists(Expr bound | bound = cmp.getAnOperand() and bound != this.asExpr() |
-        bound.(VariableAccess).getTarget().getName().regexpMatch(".*[Ss]z$|.*[Ll]en$|.*[Ss]ize$|.*[Mm]ax.*")
-        or
-        bound instanceof Literal
-      )
-    )
-  }
-}
-
-//
-// Sinks: memory operations whose size/length argument is attacker-derived.
+// Sinks: the size/count argument of memory allocation and copy operations.
 //
 class MemorySink extends DataFlow::Node {
   MemorySink() {
@@ -68,13 +50,48 @@ class MemorySink extends DataFlow::Node {
   }
 }
 
+//
+// Barriers: the length was compared against a named max/capacity variable.
+// Only fires when the other comparison operand is a variable with "max",
+// "sz", "size", "limit", "bound", or "cap" in its name — not bare literals,
+// which would over-suppress (e.g. "if (len == 0)" is not a bounds check).
+//
+class ValidatedLength extends DataFlow::Node {
+  ValidatedLength() {
+    exists(ComparisonOperation cmp, VariableAccess bound |
+      cmp.getAnOperand() = this.asExpr() and
+      bound = cmp.getAnOperand() and
+      bound != this.asExpr() and
+      bound.getTarget().getName().regexpMatch("(?i).*(max|sz|size|limit|bound|cap).*") and
+      not bound.getTarget().getName().regexpMatch("(?i).*min.*")
+    )
+  }
+}
+
 module TaintConfig implements DataFlow::ConfigSig {
   predicate isSource(DataFlow::Node source) {
     source instanceof UncheckedLengthSource
   }
 
+  //
+  // Model the output-parameter write: after GetLength_ex(check=0) returns,
+  // the variable pointed to by argument 2 holds an attacker-derived length.
+  // Propagate taint from &var (the address-of expression) to subsequent reads
+  // of var within the same function so the path shows the real variable name.
+  //
+  predicate isAdditionalFlowStep(DataFlow::Node n1, DataFlow::Node n2) {
+    exists(FunctionCall fc, Variable v |
+      fc.getTarget().getName() = "GetLength_ex" and
+      fc.getArgument(4).(Literal).getValue() = "0" and
+      fc.getArgument(2).(AddressOfExpr).getOperand().(VariableAccess).getTarget() = v and
+      n1.asExpr() = fc.getArgument(2) and
+      n2.asExpr().(VariableAccess).getTarget() = v and
+      n2.asExpr().getEnclosingFunction() = fc.getEnclosingFunction()
+    )
+  }
+
   predicate isBarrier(DataFlow::Node node) {
-    node instanceof LengthBoundsCheck
+    node instanceof ValidatedLength
   }
 
   predicate isSink(DataFlow::Node sink) {
@@ -89,5 +106,5 @@ import Taint::PathGraph
 from Taint::PathNode source, Taint::PathNode sink
 where Taint::flowPath(source, sink)
 select sink.getNode(), source, sink,
-  "Length from unchecked GetLength_ex (check=0) at $@ reaches memory operation without bounds validation.",
-  source.getNode(), "GetLength_ex check=0"
+  "Length from GetLength_ex(check=0) at $@ flows to memory operation without validated upper bound.",
+  source.getNode(), "unchecked GetLength_ex output"
