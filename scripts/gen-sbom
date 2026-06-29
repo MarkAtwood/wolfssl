@@ -737,10 +737,174 @@ def spdx_dep_package(key, dep_version_overrides=None):
     return spdx_id, pkg
 
 
+# ---------------------------------------------------------------------------
+# FIPS module boundary + CMVP certificate (SBOM-jm3l)
+# ---------------------------------------------------------------------------
+# The wolfCrypt FIPS module is a *subset* of the files linked into
+# libwolfssl: the object code between wolfcrypt_first.o and wolfcrypt_last.o
+# that the in-core integrity check (verifyCore / fips-hash.sh) hashes at load
+# time.  That same set is declared in src/include.am as the sources appended
+# to src_libwolfssl..._la_SOURCES inside the version's BUILD_FIPS_* automake
+# block, between wolfcrypt_first.c and wolfcrypt_last.c.  Marking that subset
+# lets an auditor see which components of the shipped .so are inside the
+# CMVP-validated boundary versus merely co-located (TLS, the rest of
+# wolfSSL).  Per-algorithm `if BUILD_*` guards decide which files a given
+# build actually compiles in; we record that gating so the SBOM distinguishes
+# "always in boundary" from "in boundary iff feature enabled".
+#
+# ponytail: parses src/include.am (pre-configure) for the full candidate set
+# + gating.  Ceiling: this is the union over build configs, not one build's
+# exact compiled set.  Upgrade path: a --fips-boundary-makefile mode that
+# parses the resolved Makefile post-./configure and cross-checks the
+# verifyCore in-core hash against the marked set.
+_FIPS_VERSION_BLOCK = {
+    'v2': 'BUILD_FIPS_V2',
+    'v5': 'BUILD_FIPS_V5',
+    'v6': 'BUILD_FIPS_V6_PLUS',
+}
+_FIPS_SRC_RE = re.compile(r'wolfcrypt/src/\S+\.(?:c|S|cu)')
+_FIPS_VARREF_RE = re.compile(r'\$\((\w+)\)')
+_FIPS_ASSIGN_RE = re.compile(r'^\s*(\w+)\s*:=\s*(.*)$')
+
+
+def parse_fips_boundary(include_am_path, version):
+    """Extract the wolfCrypt FIPS module boundary from src/include.am.
+
+    Returns {'always': [relpaths], 'gated': {relpath: [conditions]}}.
+    `always` is inside the validated boundary for any config of this FIPS
+    version; `gated` files are in only when their BUILD_* conditions hold.
+    BUILD_FIPS and the version block itself are implied, so they are not
+    reported as distinguishing conditions."""
+    block = _FIPS_VERSION_BLOCK[version]
+    implied = {block, 'BUILD_FIPS'}
+    try:
+        with open(include_am_path) as f:
+            raw = f.read().splitlines()
+    except OSError as e:
+        sys.exit(f"ERROR: cannot read --fips-boundary {include_am_path!r}: {e}")
+
+    # Join automake line continuations so a multi-line `+=` is one record.
+    lines, buf = [], ''
+    for s in raw:
+        if s.endswith('\\'):
+            buf += s[:-1] + ' '
+            continue
+        lines.append(buf + s)
+        buf = ''
+    if buf:
+        lines.append(buf)
+
+    cond_stack = []
+    block_depth = None
+    variables = {}
+    found = {}
+
+    for line in lines:
+        st = line.strip()
+        m = _FIPS_ASSIGN_RE.match(line)
+        if m:
+            variables[m.group(1)] = m.group(2).strip()
+        if st.startswith('if '):
+            cond_stack.append(st[3:].strip())
+            if cond_stack[-1] == block and block_depth is None:
+                block_depth = len(cond_stack)
+            continue
+        if st.startswith('else'):
+            if cond_stack:
+                top = cond_stack[-1]
+                cond_stack[-1] = top[1:] if top.startswith('!') else '!' + top
+            continue
+        if st.startswith('endif'):
+            if block_depth is not None and len(cond_stack) == block_depth:
+                block_depth = None
+            if cond_stack:
+                cond_stack.pop()
+            continue
+        if block_depth is None or '_la_SOURCES' not in line or '+=' not in line:
+            continue
+        rhs = _FIPS_VARREF_RE.sub(
+            lambda mo: variables.get(mo.group(1), ''), line.split('+=', 1)[1])
+        conds = tuple(c for c in cond_stack if c not in implied)
+        for path in _FIPS_SRC_RE.findall(rhs):
+            found.setdefault(path, set()).update(conds)
+
+    if not found:
+        sys.exit(
+            f"ERROR: --fips-boundary {include_am_path!r}: no FIPS source set "
+            f"found for {version} ({block}). Verify this is a FIPS bundle's "
+            f"src/include.am and that --fips-version matches the bundle.")
+    return {
+        'always': sorted(p for p, c in found.items() if not c),
+        'gated': {p: sorted(c) for p, c in found.items() if c},
+    }
+
+
+def parse_cmvp_cert(spec):
+    """Parse --cmvp-cert 'cert=4718;module=wolfCrypt;moduleversion=6.0.0;...'
+    into a dict of fields.  `cert` is required.  Unknown keys are kept so the
+    SBOM can carry whatever the validation record provides (standard,
+    validated date, platforms, url) without a fixed schema here."""
+    fields = {}
+    for part in spec.split(';'):
+        part = part.strip()
+        if not part:
+            continue
+        if '=' not in part:
+            sys.exit(
+                "ERROR: --cmvp-cert expects ';'-separated KEY=VALUE pairs, "
+                f"got {part!r}")
+        k, _, v = part.partition('=')
+        fields[k.strip()] = v.strip()
+    if 'cert' not in fields:
+        sys.exit("ERROR: --cmvp-cert must include cert=<CMVP certificate "
+                 "number>, e.g. --cmvp-cert 'cert=4718;module=wolfCrypt'")
+    return fields
+
+
+def _fips_cdx_properties(fips_info):
+    """CDX properties describing the FIPS boundary + CMVP cert, attached to
+    the FIPS-module sub-component (never the whole-library component)."""
+    props = [{'name': 'wolfssl:fips:version', 'value': fips_info['version']}]
+    boundary = fips_info.get('boundary')
+    if boundary:
+        all_files = sorted(boundary['always'] + list(boundary['gated']))
+        props.append({'name': 'wolfssl:fips:boundary-file-count',
+                      'value': str(len(all_files))})
+        props.append({'name': 'wolfssl:fips:boundary-files',
+                      'value': ','.join(all_files)})
+        props.append({'name': 'wolfssl:fips:boundary-always',
+                      'value': ','.join(boundary['always'])})
+    for k, v in (fips_info.get('cmvp') or {}).items():
+        props.append({'name': f'wolfssl:fips:cmvp-{k}', 'value': v})
+    return props
+
+
+def fips_cdx_component(name, version, fips_info):
+    """A CDX 1.6 cryptographic-asset sub-component for the CMVP-validated
+    wolfCrypt module boundary, nested under the library component.  The
+    library ships more than the module; this names the validated subset."""
+    cmvp = fips_info.get('cmvp') or {}
+    comp = {
+        'bom-ref': derived_uuid(name, version, 'fips-module'),
+        'type': 'cryptographic-asset',
+        'name': cmvp.get('module', 'wolfCrypt FIPS module'),
+        'version': cmvp.get('moduleversion', version),
+        'description': ('CMVP-validated cryptographic module boundary; a '
+                        'subset of the files linked into the library'),
+        'properties': _fips_cdx_properties(fips_info),
+    }
+    if cmvp.get('url'):
+        comp['externalReferences'] = [
+            {'type': 'certification-report', 'url': cmvp['url']},
+        ]
+    return comp
+
+
 def generate_cdx(name, version, supplier, license_id, license_text, lib_hash,
                  timestamp, year, serial, enabled_deps, build_props,
                  dep_version_overrides=None, hash_kind='library-binary',
-                 hash_source='lib', srcs_basenames=None, file_entries=None):
+                 hash_source='lib', srcs_basenames=None, file_entries=None,
+                 fips_info=None):
     bom_ref = derived_uuid(name, version, 'package')
 
     dep_bom_refs = []
@@ -810,8 +974,9 @@ def generate_cdx(name, version, supplier, license_id, license_text, lib_hash,
     # binary so an auditor running a CDX parser can resolve the SHA-256
     # in `hashes` back to a concrete file path; embedded paths skip
     # this since the source-set Merkle hash already captures the inputs.
+    sub_components = []
     if file_entries:
-        main_component['components'] = [
+        sub_components.extend(
             {
                 'type': 'file',
                 'name': fe['name'],
@@ -821,7 +986,16 @@ def generate_cdx(name, version, supplier, license_id, license_text, lib_hash,
                 ],
             }
             for fe in file_entries
-        ]
+        )
+    # The FIPS-module boundary is a cryptographic-asset sub-component, not a
+    # property on the library itself: the library is bigger than the module,
+    # so stamping FIPS metadata on the whole component would overclaim
+    # validation scope.  Nesting it keeps "validated module" and "shipped
+    # library" as distinct, queryable elements.
+    if fips_info:
+        sub_components.append(fips_cdx_component(name, version, fips_info))
+    if sub_components:
+        main_component['components'] = sub_components
 
     return {
         '$schema': 'http://cyclonedx.org/schema/bom-1.6.schema.json',
@@ -853,7 +1027,7 @@ def generate_spdx(name, version, supplier, license_id, license_text, lib_hash,
                   timestamp, year, doc_ns_uuid, enabled_deps, build_props,
                   dep_version_overrides=None, hash_kind='library-binary',
                   hash_source='lib', srcs_basenames=None,
-                  document_namespace=None, file_entries=None):
+                  document_namespace=None, file_entries=None, fips_info=None):
     build_defines = ', '.join(k for k, _ in build_props)
     # Hash-kind / source-set / bomsh-traced-binary information used to
     # be stuffed into the package `comment` as `key=value` slugs, which
@@ -883,6 +1057,36 @@ def generate_spdx(name, version, supplier, license_id, license_text, lib_hash,
         _annotate(f'wolfssl:sbom:no-artifact-hash-note={_NO_HASH_NOTE}')
     if srcs_basenames:
         _annotate('wolfssl:sbom:source-set=' + ','.join(srcs_basenames))
+    # FIPS boundary + CMVP cert as structured annotations.  SPDX's package
+    # model is coarser than CDX's nested components, so we annotate the
+    # wolfssl package rather than emit a separate sub-package.  ponytail:
+    # a fuller model would add SPDXRef-Package-wolfcrypt-fips with a
+    # CONTAINED_BY relationship mirroring the CDX cryptographic-asset; that
+    # is the upgrade path if downstream SPDX consumers need the module as a
+    # first-class element. The CMVP cert also goes in externalRefs below.
+    fips_external_refs = []
+    if fips_info:
+        _annotate(f"wolfssl:fips:version={fips_info['version']}")
+        boundary = fips_info.get('boundary')
+        if boundary:
+            all_files = sorted(boundary['always'] + list(boundary['gated']))
+            _annotate(f'wolfssl:fips:boundary-file-count={len(all_files)}')
+            _annotate('wolfssl:fips:boundary-files=' + ','.join(all_files))
+            _annotate('wolfssl:fips:boundary-always='
+                      + ','.join(boundary['always']))
+        cmvp = fips_info.get('cmvp') or {}
+        for k, v in cmvp.items():
+            _annotate(f'wolfssl:fips:cmvp-{k}={v}')
+        if cmvp:
+            # SPDX 2.3 §11.1: OTHER category referenceType is a free-form
+            # idstring (no whitespace); locator is the cert URL when known,
+            # else the canonical CMVP-<cert#> token.
+            locator = cmvp.get('url') or f"CMVP-{cmvp['cert']}"
+            fips_external_refs.append({
+                'referenceCategory': 'OTHER',
+                'referenceType': 'cmvp-certificate',
+                'referenceLocator': locator,
+            })
 
     wolfssl_pkg = {
         'SPDXID': 'SPDXRef-Package-wolfssl',
@@ -917,6 +1121,7 @@ def generate_spdx(name, version, supplier, license_id, license_text, lib_hash,
                     'https://github.com/wolfSSL/wolfssl/security/advisories'
                 ),
             },
+            *fips_external_refs,
         ],
     }
 
@@ -1102,6 +1307,30 @@ def main():
                              'directing integrators to contact wolfSSL.  '
                              'Mutually exclusive with --lib / --srcs / '
                              '--srcs-file.')
+    # FIPS module boundary + CMVP certificate (SBOM-jm3l).  Optional; when
+    # present, mark which components of the built library are inside the
+    # CMVP-validated wolfCrypt module boundary versus merely shipped
+    # alongside it.  Used when generating an SBOM for a FIPS bundle.
+    parser.add_argument('--fips-boundary', metavar='INCLUDE_AM',
+                        help='Path to src/include.am from a FIPS bundle. '
+                             'gen-sbom extracts the wolfCrypt module boundary '
+                             '(sources between wolfcrypt_first.c and '
+                             'wolfcrypt_last.c in the --fips-version block) '
+                             'and records them as the CMVP-validated set on a '
+                             'nested cryptographic-asset component.')
+    parser.add_argument('--fips-version', choices=['v2', 'v5', 'v6'],
+                        default='v6',
+                        help='FIPS module version selecting the include.am '
+                             'BUILD_FIPS_* block that defines the boundary '
+                             '(default: v6 = BUILD_FIPS_V6_PLUS).')
+    parser.add_argument('--cmvp-cert', metavar='SPEC',
+                        help="CMVP certificate metadata as ';'-separated "
+                             "KEY=VALUE pairs, e.g. 'cert=4718;"
+                             "module=wolfCrypt;moduleversion=6.0.0;"
+                             "standard=FIPS 140-3;url=https://csrc.nist.gov/"
+                             "projects/cmvp/.../4718'.  cert is required; "
+                             "other keys are recorded verbatim.  Attached to "
+                             "the FIPS-module component only.")
     parser.add_argument('--dep-libz', default='no',
                         help='yes if built with --with-libz')
     parser.add_argument('--dep-liboqs', default='no',
@@ -1284,6 +1513,27 @@ def main():
         hash_source = 'srcs'
         srcs_basenames = sorted({os.path.basename(p) for p in srcs})
 
+    # FIPS boundary / CMVP cert (SBOM-jm3l).  --cmvp-cert is allowed without
+    # --fips-boundary (record the certificate even if the include.am isn't to
+    # hand), but the boundary marking is the point, so warn in that case.
+    fips_info = None
+    if args.fips_boundary:
+        fips_info = {
+            'version': args.fips_version,
+            'boundary': parse_fips_boundary(args.fips_boundary,
+                                            args.fips_version),
+            'cmvp': parse_cmvp_cert(args.cmvp_cert) if args.cmvp_cert else None,
+        }
+    elif args.cmvp_cert:
+        print("NOTE: --cmvp-cert without --fips-boundary: recording the CMVP "
+              "certificate but not the in-module boundary file set.",
+              file=sys.stderr)
+        fips_info = {
+            'version': args.fips_version,
+            'boundary': None,
+            'cmvp': parse_cmvp_cert(args.cmvp_cert),
+        }
+
     dt, timestamp = build_timestamp()
     year = dt.year
     serial = derived_uuid(args.name, args.version, 'serial')
@@ -1297,6 +1547,7 @@ def main():
         hash_kind=hash_kind, hash_source=hash_source,
         srcs_basenames=srcs_basenames,
         file_entries=file_entries,
+        fips_info=fips_info,
     )
     spdx = generate_spdx(
         args.name, args.version, args.supplier,
@@ -1307,6 +1558,7 @@ def main():
         srcs_basenames=srcs_basenames,
         document_namespace=(args.document_namespace or None),
         file_entries=file_entries,
+        fips_info=fips_info,
     )
 
     try:
