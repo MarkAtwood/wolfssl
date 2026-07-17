@@ -53,6 +53,12 @@
 #include <wolfssl/wolfcrypt/aes.h>
 #include <wolfssl/wolfcrypt/hmac.h>
 #include <wolfssl/wolfcrypt/ecc.h>
+#ifdef WOLFSSL_SHA3
+#include <wolfssl/wolfcrypt/sha3.h>
+#endif
+#ifdef HAVE_ED25519
+#include <wolfssl/wolfcrypt/ed25519.h>
+#endif
 #include <wolfssl/wolfcrypt/random.h>
 #include <wolfssl/wolfcrypt/wc_port.h>
 #include <wolfssl/ssl.h>
@@ -1839,6 +1845,258 @@ static int test_selftest(void)
 #endif /* HAVE_AESGCM */
 
 /* ------------------------------------------------------------------ */
+/* Explicit-unavailable fallback tests (enum audit, wolfssl-jond.2)     */
+/*                                                                     */
+/* Each test drives an op the port declines with CRYPTOCB_UNAVAILABLE  */
+/* through a devId-bound object and checks the software fallback        */
+/* result against an independent published vector.                      */
+/* ------------------------------------------------------------------ */
+
+#if defined(WOLFSSL_SHA3) && defined(WOLFSSL_SHAKE128)
+/* Source: NIST FIPS 202 / XKCP known-answer set.
+ * SHAKE128("", 16) = 7f9c2ba4e88f827d616045507605853e */
+static int test_shake128_fallback(void)
+{
+    wc_Shake shake;
+    byte out[16];
+    byte expected[16];
+    int ret;
+
+    ret = hex_decode("7f9c2ba4e88f827d616045507605853e",
+                     expected, sizeof(expected));
+    if (ret != (int)sizeof(expected))
+        return -1;
+
+    ret = wc_InitShake128(&shake, NULL, WOLF_CRYPTO2DEV_DEVID);
+    if (ret != 0) return ret;
+    ret = wc_Shake128_Final(&shake, out, (word32)sizeof(out));
+    wc_Shake128_Free(&shake);
+    if (ret != 0) return ret;
+
+    if (XMEMCMP(out, expected, sizeof(expected)) != 0)
+        return -1;
+
+    WOLFSSL_MSG("crypto2dev_test: SHAKE128 fallback KAT passed");
+    return 0;
+}
+#endif /* WOLFSSL_SHA3 && WOLFSSL_SHAKE128 */
+
+#if defined(WOLFSSL_SHA3) && defined(WOLFSSL_SHAKE256)
+/* Source: NIST FIPS 202 / XKCP known-answer set.
+ * SHAKE256("", 32) =
+ *   46b9dd2b0ba88d13233b3feb743eeb243fcd52ea62b81b82b50c27646ed5762f */
+static int test_shake256_fallback(void)
+{
+    wc_Shake shake;
+    byte out[32];
+    byte expected[32];
+    int ret;
+
+    ret = hex_decode(
+        "46b9dd2b0ba88d13233b3feb743eeb24"
+        "3fcd52ea62b81b82b50c27646ed5762f",
+        expected, sizeof(expected));
+    if (ret != (int)sizeof(expected))
+        return -1;
+
+    ret = wc_InitShake256(&shake, NULL, WOLF_CRYPTO2DEV_DEVID);
+    if (ret != 0) return ret;
+    ret = wc_Shake256_Final(&shake, out, (word32)sizeof(out));
+    wc_Shake256_Free(&shake);
+    if (ret != 0) return ret;
+
+    if (XMEMCMP(out, expected, sizeof(expected)) != 0)
+        return -1;
+
+    WOLFSSL_MSG("crypto2dev_test: SHAKE256 fallback KAT passed");
+    return 0;
+}
+#endif /* WOLFSSL_SHA3 && WOLFSSL_SHAKE256 */
+
+#ifdef WOLFSSL_AES_CFB
+/* Source: NIST SP 800-38A, F.3.13 CFB128-AES128.Encrypt, Segment 1.
+ * Key 2b7e151628aed2a6abf7158809cf4f3c, IV 000102030405060708090a0b0c0d0e0f,
+ * PT 6bc1bee22e409f96e93d7e117393172a, CT 3b3fd92eb72dad20333449f8e83cfb4a */
+static int test_aes_cfb_fallback(void)
+{
+    Aes aes;
+    byte key[16], iv[16], pt[16], expected_ct[16], ct[16];
+    int ret;
+
+    ret  = hex_decode("2b7e151628aed2a6abf7158809cf4f3c", key, sizeof(key));
+    ret += hex_decode("000102030405060708090a0b0c0d0e0f", iv,  sizeof(iv));
+    ret += hex_decode("6bc1bee22e409f96e93d7e117393172a", pt,  sizeof(pt));
+    ret += hex_decode("3b3fd92eb72dad20333449f8e83cfb4a",
+                      expected_ct, sizeof(expected_ct));
+    if (ret != 4 * 16)
+        return -1;
+
+    ret = wc_AesInit(&aes, NULL, WOLF_CRYPTO2DEV_DEVID);
+    if (ret != 0) return ret;
+    ret = wc_AesSetKey(&aes, key, (word32)sizeof(key), iv, AES_ENCRYPTION);
+    if (ret == 0)
+        ret = wc_AesCfbEncrypt(&aes, ct, pt, (word32)sizeof(pt));
+    wc_AesFree(&aes);
+    if (ret != 0) return ret;
+
+    if (XMEMCMP(ct, expected_ct, sizeof(expected_ct)) != 0)
+        return -1;
+
+    WOLFSSL_MSG("crypto2dev_test: AES-CFB fallback KAT passed");
+    return 0;
+}
+#endif /* WOLFSSL_AES_CFB */
+
+#ifdef WOLFSSL_AES_OFB
+/* Source: NIST SP 800-38A, F.4.1 OFB-AES128.Encrypt, Block 1.
+ * Key 2b7e151628aed2a6abf7158809cf4f3c, IV 000102030405060708090a0b0c0d0e0f,
+ * PT 6bc1bee22e409f96e93d7e117393172a, CT 3b3fd92eb72dad20333449f8e83cfb4a */
+static int test_aes_ofb_fallback(void)
+{
+    Aes aes;
+    byte key[16], iv[16], pt[16], expected_ct[16], ct[16];
+    int ret;
+
+    ret  = hex_decode("2b7e151628aed2a6abf7158809cf4f3c", key, sizeof(key));
+    ret += hex_decode("000102030405060708090a0b0c0d0e0f", iv,  sizeof(iv));
+    ret += hex_decode("6bc1bee22e409f96e93d7e117393172a", pt,  sizeof(pt));
+    ret += hex_decode("3b3fd92eb72dad20333449f8e83cfb4a",
+                      expected_ct, sizeof(expected_ct));
+    if (ret != 4 * 16)
+        return -1;
+
+    ret = wc_AesInit(&aes, NULL, WOLF_CRYPTO2DEV_DEVID);
+    if (ret != 0) return ret;
+    ret = wc_AesSetKey(&aes, key, (word32)sizeof(key), iv, AES_ENCRYPTION);
+    if (ret == 0)
+        ret = wc_AesOfbEncrypt(&aes, ct, pt, (word32)sizeof(pt));
+    wc_AesFree(&aes);
+    if (ret != 0) return ret;
+
+    if (XMEMCMP(ct, expected_ct, sizeof(expected_ct)) != 0)
+        return -1;
+
+    WOLFSSL_MSG("crypto2dev_test: AES-OFB fallback KAT passed");
+    return 0;
+}
+#endif /* WOLFSSL_AES_OFB */
+
+#if defined(HAVE_ED25519) && defined(HAVE_ED25519_KEY_IMPORT) && \
+    defined(HAVE_ED25519_MAKE_KEY)
+/* Source: RFC 8032, section 7.1, TEST 1.
+ * Secret key 9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60
+ * Public key d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
+ * Drives WC_PK_TYPE_ED25519_MAKE_PUB and ED25519_CHECK_KEY through the
+ * callback; the port declines both, and software must produce the RFC
+ * public key and accept the valid pair. */
+static int test_ed25519_fallback(void)
+{
+    ed25519_key key;
+    byte priv[ED25519_KEY_SIZE];
+    byte pub[ED25519_PUB_KEY_SIZE];
+    byte expected_pub[ED25519_PUB_KEY_SIZE];
+    int ret;
+
+    ret = hex_decode(
+        "9d61b19deffd5a60ba844af492ec2cc4"
+        "4449c5697b326919703bac031cae7f60", priv, sizeof(priv));
+    if (ret != (int)sizeof(priv))
+        return -1;
+    ret = hex_decode(
+        "d75a980182b10ab7d54bfed3c964073a"
+        "0ee172f3daa62325af021a68f707511a",
+        expected_pub, sizeof(expected_pub));
+    if (ret != (int)sizeof(expected_pub))
+        return -1;
+
+    ret = wc_ed25519_init_ex(&key, NULL, WOLF_CRYPTO2DEV_DEVID);
+    if (ret != 0) return ret;
+
+    ret = wc_ed25519_import_private_only(priv, (word32)sizeof(priv), &key);
+    if (ret == 0)
+        ret = wc_ed25519_make_public(&key, pub, (word32)sizeof(pub));
+    if (ret == 0 && XMEMCMP(pub, expected_pub, sizeof(expected_pub)) != 0)
+        ret = -1;
+    if (ret == 0)
+        ret = wc_ed25519_import_public(expected_pub,
+                                       (word32)sizeof(expected_pub), &key);
+    if (ret == 0)
+        ret = wc_ed25519_check_key(&key);
+
+    wc_ed25519_free(&key);
+    if (ret != 0) return ret;
+
+    WOLFSSL_MSG("crypto2dev_test: Ed25519 make_pub/check_key fallback passed");
+    return 0;
+}
+#endif /* HAVE_ED25519 && HAVE_ED25519_KEY_IMPORT && HAVE_ED25519_MAKE_KEY */
+
+#if defined(HAVE_ECC) && defined(HAVE_ECC_KEY_EXPORT) && \
+    defined(HAVE_ECC_KEY_IMPORT)
+/* Drives WC_PK_TYPE_EC_MAKE_PUB (via software keygen on a devId-bound key)
+ * and WC_PK_TYPE_EC_CHECK_PUB_KEY through the callback.  The port declines
+ * both; software keygen must yield a key that passes wc_ecc_check_key, and
+ * a corrupted public point must still be rejected (guards against a future
+ * handler claiming success without validating). */
+static int test_ecc_pubkey_ops_fallback(void)
+{
+    ecc_key key;
+    WC_RNG  rng;
+    byte    x963[1 + 2 * ECC_MAXSIZE];
+    word32  x963_len = (word32)sizeof(x963);
+    int     ret;
+
+    ret = wc_InitRng(&rng);
+    if (ret != 0) return ret;
+
+    ret = wc_ecc_init_ex(&key, NULL, WOLF_CRYPTO2DEV_DEVID);
+    if (ret != 0) { wc_FreeRng(&rng); return ret; }
+
+    ret = wc_ecc_make_key_ex(&rng, 32, &key, ECC_SECP256R1);
+    if (ret == 0)
+        ret = wc_ecc_check_key(&key);
+    if (ret == 0)
+        ret = wc_ecc_export_x963(&key, x963, &x963_len);
+
+    if (ret == 0) {
+        ecc_key bad_key;
+        /* Corrupt the low byte of Y: the result is on neither root of the
+         * curve equation, so validation must fail. */
+        x963[x963_len - 1] ^= 0x01;
+        ret = wc_ecc_init_ex(&bad_key, NULL, WOLF_CRYPTO2DEV_DEVID);
+        if (ret == 0) {
+            int check_ret = wc_ecc_import_x963_ex(x963, x963_len, &bad_key,
+                                                  ECC_SECP256R1);
+            if (check_ret == 0)
+                check_ret = wc_ecc_check_key(&bad_key);
+            /* Rejection at import or at check both count as rejection. */
+            if (check_ret == 0)
+                ret = -1;
+            wc_ecc_free(&bad_key);
+        }
+    }
+
+    wc_ecc_free(&key);
+    wc_FreeRng(&rng);
+    if (ret != 0) return ret;
+
+    WOLFSSL_MSG("crypto2dev_test: ECC make_pub/check_key fallback passed");
+    return 0;
+}
+#endif /* HAVE_ECC && HAVE_ECC_KEY_EXPORT && HAVE_ECC_KEY_IMPORT */
+
+/* Upstream PR #10604: wc_CryptoCb_IsDeviceRegistered is answered inside
+ * cryptocb.c and never reaches the callback; verify it sees our
+ * registration. */
+static int test_devid_registered(void)
+{
+    if (wc_CryptoCb_IsDeviceRegistered(WOLF_CRYPTO2DEV_DEVID) != 1)
+        return -1;
+    WOLFSSL_MSG("crypto2dev_test: IsDeviceRegistered passed");
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
 /* Public entry point                                                   */
 /* ------------------------------------------------------------------ */
 
@@ -1863,17 +2121,55 @@ int wc_crypto2dev_test(void)
         return ret;
     }
 
+    ret = test_devid_registered();
+    if (ret != 0) {
+        WOLFSSL_MSG("crypto2dev_test: IsDeviceRegistered FAILED");
+        goto done;
+    }
+
     ret = test_sha256_empty();
     if (ret != 0) {
         WOLFSSL_MSG("crypto2dev_test: SHA-256 KAT FAILED");
         goto done;
     }
 
+#if defined(WOLFSSL_SHA3) && defined(WOLFSSL_SHAKE128)
+    ret = test_shake128_fallback();
+    if (ret != 0) {
+        WOLFSSL_MSG("crypto2dev_test: SHAKE128 fallback KAT FAILED");
+        goto done;
+    }
+#endif
+
+#if defined(WOLFSSL_SHA3) && defined(WOLFSSL_SHAKE256)
+    ret = test_shake256_fallback();
+    if (ret != 0) {
+        WOLFSSL_MSG("crypto2dev_test: SHAKE256 fallback KAT FAILED");
+        goto done;
+    }
+#endif
+
     ret = test_aes_cbc_128();
     if (ret != 0) {
         WOLFSSL_MSG("crypto2dev_test: AES-CBC-128 KAT FAILED");
         goto done;
     }
+
+#ifdef WOLFSSL_AES_CFB
+    ret = test_aes_cfb_fallback();
+    if (ret != 0) {
+        WOLFSSL_MSG("crypto2dev_test: AES-CFB fallback KAT FAILED");
+        goto done;
+    }
+#endif
+
+#ifdef WOLFSSL_AES_OFB
+    ret = test_aes_ofb_fallback();
+    if (ret != 0) {
+        WOLFSSL_MSG("crypto2dev_test: AES-OFB fallback KAT FAILED");
+        goto done;
+    }
+#endif
 
 #ifdef WOLFSSL_AES_COUNTER
     ret = test_aes_ctr_multicall();
@@ -1973,6 +2269,23 @@ int wc_crypto2dev_test(void)
         goto done;
     }
 #endif
+
+#if defined(HAVE_ECC_KEY_EXPORT) && defined(HAVE_ECC_KEY_IMPORT)
+    ret = test_ecc_pubkey_ops_fallback();
+    if (ret != 0) {
+        WOLFSSL_MSG("crypto2dev_test: ECC make_pub/check_key fallback FAILED");
+        goto done;
+    }
+#endif
+#endif
+
+#if defined(HAVE_ED25519) && defined(HAVE_ED25519_KEY_IMPORT) && \
+    defined(HAVE_ED25519_MAKE_KEY)
+    ret = test_ed25519_fallback();
+    if (ret != 0) {
+        WOLFSSL_MSG("crypto2dev_test: Ed25519 fallback FAILED");
+        goto done;
+    }
 #endif
 
 #if defined(WOLF_CRYPTO_CB_COPY) && defined(WOLF_CRYPTO_CB_SETKEY)
@@ -2013,6 +2326,11 @@ done:
     wc_crypto2dev_cleanup(); /* unregisters WOLF_CRYPTO2DEV_DEVID automatically */
     if (ret != 0)
         return ret;
+
+    if (wc_CryptoCb_IsDeviceRegistered(WOLF_CRYPTO2DEV_DEVID) != 0) {
+        WOLFSSL_MSG("crypto2dev_test: devId still registered after cleanup");
+        return -1;
+    }
 
     ret = test_hmac_final_pool_exhaustion();
     if (ret != 0) {

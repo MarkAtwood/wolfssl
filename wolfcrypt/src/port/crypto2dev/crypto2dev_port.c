@@ -554,20 +554,22 @@ static int crypto2dev_free_pk(const wc_CryptoInfo* info)
         case WC_PK_TYPE_EC_KEYGEN: {
             ecc_key* key = (ecc_key*)info->free.obj;
             if (key == NULL)
-                return 0;
+                return CRYPTOCB_UNAVAILABLE;
             devctx_ptr = (void**)&key->devCtx;
             break;
         }
         case WC_PK_TYPE_RSA:
-        case WC_PK_TYPE_RSA_GET_SIZE: {
-            RsaKey* key = (RsaKey*)info->free.obj;
-            if (key == NULL)
-                return 0;
-            devctx_ptr = (void**)&key->devCtx;
-            break;
-        }
+        case WC_PK_TYPE_RSA_GET_SIZE:
+            /* The port never imports RSA keys (SETKEY declines), so there is
+             * no devCtx fd to close.  wc_FreeRsaKey only zeroizes and frees
+             * the private key mp_ints when it sees CRYPTOCB_UNAVAILABLE, so
+             * claiming the free was handled would leave key material in the
+             * heap. */
+            return CRYPTOCB_UNAVAILABLE;
         default:
-            return 0;
+            /* Unknown PK object: the port holds no state for it.  Fall back
+             * so the caller runs its own software cleanup. */
+            return CRYPTOCB_UNAVAILABLE;
     }
 
     if (devctx_ptr != NULL && *devctx_ptr != NULL) {
@@ -575,7 +577,8 @@ static int crypto2dev_free_pk(const wc_CryptoInfo* info)
         close(fd);
         *devctx_ptr = NULL;
     }
-    return 0;
+    /* Port state released; software key cleanup must still run. */
+    return CRYPTOCB_UNAVAILABLE;
 }
 #endif /* WOLF_CRYPTO_CB_FREE */
 
@@ -680,6 +683,15 @@ static int crypto2dev_cipher(const wc_CryptoInfo* info)
             data_sz = info->cipher.aesctr.sz;
             break;
 #endif
+        case WC_CIPHER_AES_CFB:
+        case WC_CIPHER_AES_OFB:
+            /* AES-CFB/OFB unavailable by design.  Their continuation state is
+             * aes->reg plus aes->left (partial keystream carryover across
+             * non-block-aligned calls); the one-shot INIT/SET_IV/write/
+             * FINALIZE/read wire flow cannot resume mid-keystream-block, and
+             * neither the sim nor the WOLFKM provider registers cfb(aes) or
+             * ofb(aes).  wolfCrypt falls back to software. */
+            return CRYPTOCB_UNAVAILABLE;
         default:
             return CRYPTOCB_UNAVAILABLE;
     }
@@ -972,6 +984,15 @@ static int crypto2dev_hash(wc_CryptoInfo* info)
             devctx_ptr = (Crypto2DevHashCtx**)&info->hash.sha3->devCtx;
             break;
 #endif
+        case WC_HASH_TYPE_SHAKE128:
+        case WC_HASH_TYPE_SHAKE256:
+            /* SHAKE128/256 unavailable by design.  They are XOFs with a
+             * caller-chosen output length (info->hash.outSz); the uapi
+             * FINALIZE/read() contract returns a fixed per-algo digest with
+             * no way to convey the requested length, and no WOLFKM provider
+             * registers a shake algo.  Needs a paired WOLFKM uapi and
+             * provider change; until then fall through to software. */
+            return CRYPTOCB_UNAVAILABLE;
         default:
             /* Unsupported hash type: fall through to software. */
             return CRYPTOCB_UNAVAILABLE;
@@ -1287,12 +1308,15 @@ done:
 static int crypto2dev_free_cipher(const wc_CryptoInfo* info)
 {
     Aes* aes = (Aes*)info->free.obj;
-    if (aes == NULL || aes->devCtx == NULL)
-        return 0;
-    ForceZero(aes->devCtx, sizeof(Crypto2DevAesCtx));
-    XFREE(aes->devCtx, NULL, DYNAMIC_TYPE_TMP_BUFFER);
-    aes->devCtx = NULL;
-    return 0;
+    if (aes != NULL && aes->devCtx != NULL) {
+        ForceZero(aes->devCtx, sizeof(Crypto2DevAesCtx));
+        XFREE(aes->devCtx, NULL, DYNAMIC_TYPE_TMP_BUFFER);
+        aes->devCtx = NULL;
+    }
+    /* wc_AesFree treats any return other than CRYPTOCB_UNAVAILABLE as full
+     * cleanup.  The software key schedule (which SETKEY deliberately lets
+     * run) still needs zeroizing, so always fall through to software free. */
+    return CRYPTOCB_UNAVAILABLE;
 }
 
 static int crypto2dev_free_hash(const wc_CryptoInfo* info)
@@ -1303,7 +1327,7 @@ static int crypto2dev_free_hash(const wc_CryptoInfo* info)
 #ifndef NO_SHA256
         case WC_HASH_TYPE_SHA256: {
             wc_Sha256* sha = (wc_Sha256*)info->free.obj;
-            if (sha == NULL) return 0;
+            if (sha == NULL) return CRYPTOCB_UNAVAILABLE;
             devctx_ptr = &sha->devCtx;
             break;
         }
@@ -1311,7 +1335,7 @@ static int crypto2dev_free_hash(const wc_CryptoInfo* info)
 #ifdef WOLFSSL_SHA384
         case WC_HASH_TYPE_SHA384: {
             wc_Sha384* sha = (wc_Sha384*)info->free.obj;
-            if (sha == NULL) return 0;
+            if (sha == NULL) return CRYPTOCB_UNAVAILABLE;
             devctx_ptr = &sha->devCtx;
             break;
         }
@@ -1319,7 +1343,7 @@ static int crypto2dev_free_hash(const wc_CryptoInfo* info)
 #ifdef WOLFSSL_SHA512
         case WC_HASH_TYPE_SHA512: {
             wc_Sha512* sha = (wc_Sha512*)info->free.obj;
-            if (sha == NULL) return 0;
+            if (sha == NULL) return CRYPTOCB_UNAVAILABLE;
             devctx_ptr = &sha->devCtx;
             break;
         }
@@ -1329,13 +1353,17 @@ static int crypto2dev_free_hash(const wc_CryptoInfo* info)
         case WC_HASH_TYPE_SHA3_384:
         case WC_HASH_TYPE_SHA3_512: {
             wc_Sha3* sha = (wc_Sha3*)info->free.obj;
-            if (sha == NULL) return 0;
+            if (sha == NULL) return CRYPTOCB_UNAVAILABLE;
             devctx_ptr = &sha->devCtx;
             break;
         }
 #endif
         default:
-            return 0;
+            /* Hash types the port never allocates devCtx for (SHA-1,
+             * SHA-224, SHA3-224, SHAKE): claiming the free was handled
+             * would make wc_ShaFree and friends skip their own software
+             * cleanup (small-stack W buffer, platform lock release). */
+            return CRYPTOCB_UNAVAILABLE;
     }
 
     if (devctx_ptr != NULL && *devctx_ptr != NULL) {
@@ -1347,7 +1375,8 @@ static int crypto2dev_free_hash(const wc_CryptoInfo* info)
         XFREE(ctx, NULL, DYNAMIC_TYPE_TMP_BUFFER);
         *devctx_ptr = NULL;
     }
-    return 0;
+    /* Port state released; software hash cleanup must still run. */
+    return CRYPTOCB_UNAVAILABLE;
 }
 
 #ifndef NO_HMAC
@@ -1356,7 +1385,7 @@ static int crypto2dev_free_hmac(const wc_CryptoInfo* info)
     Hmac* hmac = (Hmac*)info->free.obj;
     Crypto2DevHmacCtx* ctx;
     if (hmac == NULL || hmac->devCtx == NULL)
-        return 0;
+        return CRYPTOCB_UNAVAILABLE;
     ctx = (Crypto2DevHmacCtx*)hmac->devCtx;
     /* Detect aliased devCtx from wc_HmacCopy.  wolfSSL does not dispatch COPY
      * through CryptoCb for HMAC (only for hash objects), so two Hmac structs
@@ -1371,7 +1400,7 @@ static int crypto2dev_free_hmac(const wc_CryptoInfo* info)
         WOLFSSL_MSG("crypto2dev: HMAC devCtx aliased by wc_HmacCopy — "
                     "skipping free (see wolfssl-qsi.2)");
         hmac->devCtx = NULL;
-        return 0;
+        return CRYPTOCB_UNAVAILABLE;
     }
     /* Close any open hardware op (abandoned before Final). */
     if (ctx->op_fd >= 0) {
@@ -1381,7 +1410,9 @@ static int crypto2dev_free_hmac(const wc_CryptoInfo* info)
     ForceZero(hmac->devCtx, sizeof(Crypto2DevHmacCtx));
     XFREE(hmac->devCtx, NULL, DYNAMIC_TYPE_TMP_BUFFER);
     hmac->devCtx = NULL;
-    return 0;
+    /* Port state released; software HMAC cleanup (ipad/opad zeroization)
+     * must still run in the caller. */
+    return CRYPTOCB_UNAVAILABLE;
 }
 #endif /* NO_HMAC */
 #endif /* WOLF_CRYPTO_CB_FREE */
@@ -1449,6 +1480,12 @@ static int crypto2dev_ecdsa(const wc_CryptoInfo* info)
             const char* hash_algo =
                 crypto2dev_ecdsa_hash_algo_name(info->pk.eccsign.inlen);
             if (hash_algo == NULL) {
+                /* Deliberate hard failure, not CRYPTOCB_UNAVAILABLE: SETKEY
+                 * already claimed this key for the device, and a digest
+                 * length outside 32/48/64 has no unambiguous hash algo name
+                 * on the wire.  A silent software fallback would bypass the
+                 * device for a key provisioned to it, so surface the
+                 * unsupported digest length instead. */
                 ret = BAD_FUNC_ARG;
                 goto ecdsa_sign_done;
             }
@@ -1518,7 +1555,9 @@ ecdsa_sign_done:
         XMEMSET(&verify_op, 0, sizeof(verify_op));
         verify_op.key_fd = key_fd;
         {
-            /* Same SHA-3 exclusion as sign path above. */
+            /* Same SHA-3 exclusion as sign path above.  BAD_FUNC_ARG is the
+             * same deliberate hard failure as the sign path: no silent
+             * software fallback for a key claimed by the device. */
             const char* hash_algo =
                 crypto2dev_ecdsa_hash_algo_name(info->pk.eccverify.hashlen);
             if (hash_algo == NULL)
@@ -1580,6 +1619,36 @@ static int crypto2dev_pk(const wc_CryptoInfo* info)
              * returns derived key material (OKM), not the raw shared secret (Z).
              * wolfSSL's TLS ECDH callback requires raw Z for its own KDF.
              * Fall through to software ECDH. */
+            return CRYPTOCB_UNAVAILABLE;
+        case WC_PK_TYPE_EC_MAKE_PUB:
+            /* EC_MAKE_PUB unavailable: this op derives pubOut = key->k * G,
+             * and key->k may hold a transient scalar rather than the stored
+             * private key.  wolfSSL invokes it from the software ECDSA signer
+             * for the per-signature nonce point R = k*G (see ecc.c
+             * ecc_make_pub_ex); a device answering from the resident SETKEY
+             * key fd would return d*G instead of k*G and corrupt signatures.
+             * A correct offload would have to ship the secret scalar
+             * (including per-signature nonces) to the kernel on every call;
+             * the uapi also leaves KEY_IMPORT pubkey read-back unspecified.
+             * Fall through to software point multiplication. */
+            return CRYPTOCB_UNAVAILABLE;
+        case WC_PK_TYPE_EC_CHECK_PUB_KEY:
+            /* EC_CHECK_PUB_KEY unavailable: crypto2dev has no key-validation
+             * ioctl, and KEY_IMPORT acceptance cannot express checkOrder
+             * (n*Q == infinity) or checkPriv (d*G == Q) semantics.  Returning
+             * 0 here would bypass wc_ecc_check_key software validation
+             * entirely.  Fall through to software validation. */
+            return CRYPTOCB_UNAVAILABLE;
+        case WC_PK_TYPE_ED25519_MAKE_PUB:
+        case WC_PK_TYPE_ED25519_CHECK_KEY:
+            /* Ed25519 unavailable: the crypto2dev uapi has no ed25519
+             * algorithm.  KEY_IMPORT/KEY_GENERATE define key formats only
+             * for EC and RSA, so MAKE_PUB cannot be expressed without a
+             * paired WOLFKM uapi and provider change, and no key-validation
+             * ioctl exists for CHECK_KEY.  DO_SIGN's precomputed-digest
+             * model is also incompatible with pure Ed25519 full-message
+             * signing, so no ed25519 offload path exists.  Fall through to
+             * software. */
             return CRYPTOCB_UNAVAILABLE;
         default:
             return CRYPTOCB_UNAVAILABLE;
@@ -1831,6 +1900,27 @@ cleanup:
     return ret;
 }
 
+/* Enum-vs-switch audit, 2026-07-17, against upstream base dc1c77e07.
+ * Every op this dispatch does not handle must provably reach a
+ * CRYPTOCB_UNAVAILABLE return so wolfCrypt falls back to software.
+ * Ops audited and their disposition:
+ *   WC_PK_TYPE_EC_MAKE_PUB / EC_CHECK_PUB_KEY (PR #10663): explicit
+ *       unavailable in crypto2dev_pk; no derive or validate ioctl, and the
+ *       MAKE_PUB scalar may be the transient ECDSA nonce k.
+ *   WC_PK_TYPE_ED25519_MAKE_PUB / ED25519_CHECK_KEY (PR #10830): explicit
+ *       unavailable in crypto2dev_pk; the uapi has no ed25519 algorithm.
+ *   WC_HASH_TYPE_SHAKE128/256 (PR #10750): explicit unavailable in
+ *       crypto2dev_hash; XOF output length is not expressible on the wire.
+ *   WC_CIPHER_AES_CFB / AES_OFB (d09803154): explicit unavailable in
+ *       crypto2dev_cipher; mid-keystream continuation is not expressible.
+ *   PR #10604 (wc_CryptoCb_IsDeviceRegistered, RegisterDevice ALREADY_E):
+ *       no dispatchable op; answered inside cryptocb.c, no case needed.
+ *   WC_ALGO_TYPE_FREE: all free helpers release port state and return
+ *       CRYPTOCB_UNAVAILABLE so callers always run software cleanup.
+ *   WC_ALGO_TYPE_COPY with active devCtx: intentional WC_HW_E; see the
+ *       COPY case comment below.
+ *   ECDSA sign/verify with a hardware key and a digest length outside
+ *       32/48/64: intentional BAD_FUNC_ARG; see crypto2dev_ecdsa. */
 int wc_crypto2dev_cb(int devId, wc_CryptoInfo* info, void* ctx)
 {
     Crypto2DevConfig* cfg = (Crypto2DevConfig*)ctx;
@@ -1872,7 +1962,11 @@ int wc_crypto2dev_cb(int devId, wc_CryptoInfo* info, void* ctx)
                 case WC_ALGO_TYPE_PK:
                     return crypto2dev_free_pk(info);
                 default:
-                    return 0;
+                    /* Object types the port never manages (e.g.
+                     * WC_ALGO_TYPE_SHE).  Returning 0 would claim the free
+                     * was handled and callers such as wc_SHE_Free would skip
+                     * their own zeroization, leaving secrets in memory. */
+                    return CRYPTOCB_UNAVAILABLE;
             }
 #endif
 #ifdef WOLF_CRYPTO_CB_COPY
@@ -1998,7 +2092,11 @@ int wc_crypto2dev_cb(int devId, wc_CryptoInfo* info, void* ctx)
  * TLS-safe mode.  Hardware hash (WC_ALGO_TYPE_HASH) remains active.
  * wc_crypto2dev_cleanup() unregisters all devIds registered here.
  * Idempotent: a second call with the same devId returns 0.
- * Returns BUFFER_E if WOLFSSL_CRYPTO2DEV_MAX_DEVIDS slots are occupied. */
+ * Returns BUFFER_E if WOLFSSL_CRYPTO2DEV_MAX_DEVIDS slots are occupied.
+ * Since upstream PR #10604, wc_CryptoCb_RegisterDevice returns ALREADY_E
+ * for a devId registered by another component; the g_devid_table check keeps
+ * re-registration of our own devIds idempotent, and ALREADY_E from foreign
+ * registrations propagates to the caller. */
 int wc_crypto2dev_register_ex(int devId)
 {
     int ret;
