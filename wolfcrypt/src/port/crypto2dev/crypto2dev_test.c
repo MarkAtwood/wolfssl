@@ -1556,13 +1556,20 @@ static int test_hmac_final_pool_exhaustion(void)
     hmac_inited = 1;
     ret = wc_HmacSetKey(&hmac, WC_SHA256, key, (word32)sizeof(key));
     if (ret != 0) goto pool_done;
+    /* First Update acquires the pool fd (streaming design) — must fail
+     * with WC_HW_E: the pool's only slot is held by the SHA-256 above. */
     ret = wc_HmacUpdate(&hmac, data, (word32)sizeof(data));
-    if (ret != 0) goto pool_done;
+    if (ret != WC_HW_E) {
+        WOLFSSL_MSG("crypto2dev_test: HMAC Update pool exhaustion expected WC_HW_E");
+        ret = (ret == 0) ? -1 : ret;
+        goto pool_done;
+    }
 
-    /* Final tries to acquire a pool slot — must fail (exhausted). */
+    /* Sticky error: op_fd sentinel makes Final report WC_HW_E too, even
+     * for callers that ignored the Update return code. */
     ret = wc_HmacFinal(&hmac, mac);
     if (ret != WC_HW_E) {
-        WOLFSSL_MSG("crypto2dev_test: HMAC Final pool exhaustion expected WC_HW_E");
+        WOLFSSL_MSG("crypto2dev_test: HMAC Final after failed Update expected WC_HW_E");
         ret = (ret == 0) ? -1 : ret;
         goto pool_done;
     }

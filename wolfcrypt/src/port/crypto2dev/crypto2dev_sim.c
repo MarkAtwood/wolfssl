@@ -214,6 +214,18 @@ static SimFdSlot* sim_slot(int fd)
     return &g_sim_slots[idx];
 }
 
+/* Bounded copy of a wire-supplied algo name that may lack a terminator.
+ * XSTRNCPY here trips gcc -Wstringop-truncation even with the explicit
+ * NUL store, so measure first and XMEMCPY. */
+static void sim_copy_algo(char* dst, const char* src, word32 dstSz)
+{
+    word32 n = 0;
+    while (n < dstSz - 1U && src[n] != '\0')
+        n++;
+    XMEMCPY(dst, src, n);
+    dst[n] = '\0';
+}
+
 /* ---------------------------------------------------------------------- */
 /* Finalize helpers — run the actual cryptographic operation               */
 /* ---------------------------------------------------------------------- */
@@ -585,8 +597,7 @@ static int sim_ioctl_init(SimFdSlot* slot, void* arg)
     slot->tagSz      = 0;
     slot->expected_tagSz = 0;
 
-    XSTRNCPY(slot->algo, op->algo, sizeof(slot->algo) - 1);
-    slot->algo[sizeof(slot->algo) - 1] = '\0';
+    sim_copy_algo(slot->algo, op->algo, (word32)sizeof(slot->algo));
 
     if (op->keylen > 0 && op->keylen <= sizeof(slot->key)) {
         XMEMCPY(slot->key, op->key, op->keylen);
@@ -690,8 +701,7 @@ static int sim_ioctl_key_import(SimFdSlot* slot, void* arg)
 
     slot->fd_type  = SIM_FD_KEY;
     slot->key_type = (int)op->key_type;
-    XSTRNCPY(slot->key_algo, op->algo, sizeof(slot->key_algo) - 1);
-    slot->key_algo[sizeof(slot->key_algo) - 1] = '\0';
+    sim_copy_algo(slot->key_algo, op->algo, (word32)sizeof(slot->key_algo));
 
 #ifdef HAVE_ECC
     if (XSTRNCMP(op->algo, "ecdsa", CRYPTO2DEV_ALGO_MAXLEN) == 0) {
@@ -809,6 +819,18 @@ int crypto2dev_sim_ioctl(int fd, unsigned long request, void* arg)
             (struct crypto2dev_verify_op*)arg;
         if (op == NULL) { errno = EINVAL; return -1; }
         return sim_ioctl_do_verify(op->key_fd, arg);
+    }
+
+    /* Module-level status query: valid on any open sim fd. The sim runs
+     * plain software wolfCrypt with no FIPS-gated provider, so fips_state
+     * is always CRYPTO2DEV_FIPS_NO_PROVIDER. */
+    if (request == CRYPTO2DEV_IOC_STATUS) {
+        struct crypto2dev_status* st = (struct crypto2dev_status*)arg;
+        if (st == NULL) { errno = EINVAL; return -1; }
+        XMEMSET(st, 0, sizeof(*st));
+        st->fips_state = CRYPTO2DEV_FIPS_NO_PROVIDER;
+        XSTRNCPY(st->version, "sim", sizeof(st->version) - 1);
+        return 0;
     }
 
     if (slot == NULL) {
