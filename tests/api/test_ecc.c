@@ -491,8 +491,17 @@ int test_wc_ecc_signVerify_hash(void)
     ExpectIntEQ(wc_ecc_sign_hash(digest, digestlen, sig, &siglen, &rng, NULL),
         WC_NO_ERR_TRACE(ECC_BAD_ARG_E));
 #if (!defined(HAVE_FIPS) || FIPS_VERSION_GT(7,0)) && !defined(HAVE_SELFTEST)
-    ExpectIntEQ(wc_ecc_sign_hash(digest, WC_MAX_DIGEST_SIZE+1, sig, &siglen,
-        &rng, &key), WC_NO_ERR_TRACE(BAD_LENGTH_E));
+    /* THIS ASSERTION IS THE CONTRACT UNDER DISCUSSION. It was added with the
+     * bound itself in 6c3018616. Changing the bound necessarily changes this
+     * line, which is why the branch it belongs to is a question and not a pull
+     * request: the test encodes the behaviour being asked about, so it cannot
+     * be treated as an independent check of it.
+     *
+     * Rewritten to track the sign-side bound rather than the build's digest
+     * set. The intent of the original assertion, that an over-long hash is
+     * rejected, is preserved exactly. */
+    ExpectIntEQ(wc_ecc_sign_hash(digest, WC_MAX_DIGEST_SIZE_FOR_SIGN+1, sig,
+        &siglen, &rng, &key), WC_NO_ERR_TRACE(BAD_LENGTH_E));
 #endif
 
 #ifdef HAVE_ECC_VERIFY
@@ -523,8 +532,12 @@ int test_wc_ecc_signVerify_hash(void)
     ExpectIntEQ(wc_ecc_verify_hash(sig, siglen, digest, digestlen, &verify,
         NULL), WC_NO_ERR_TRACE(ECC_BAD_ARG_E));
 #if (!defined(HAVE_FIPS) || FIPS_VERSION_GT(7,0)) && !defined(HAVE_SELFTEST)
-    ExpectIntEQ(wc_ecc_verify_hash(sig, siglen, digest, WC_MAX_DIGEST_SIZE+1,
-        &verify, &key), WC_NO_ERR_TRACE(BAD_LENGTH_E));
+    /* Companion to the sign-side assertion above; same caveat applies. See Q3
+     * in the question block in wolfcrypt/src/ecc.c: this is the verify side,
+     * where the caller supplies the digest and did not choose its algorithm. */
+    ExpectIntEQ(wc_ecc_verify_hash(sig, siglen, digest,
+        WC_MAX_DIGEST_SIZE_FOR_VERIFY+1, &verify, &key),
+        WC_NO_ERR_TRACE(BAD_LENGTH_E));
 #endif
 #endif /* HAVE_ECC_VERIFY */
 
@@ -2806,7 +2819,9 @@ int test_wc_EccDecisionCoverage(void)
 #if defined(WOLFSSL_PUBLIC_MP)
         {
             mp_int r, s;
-            byte   longDigest[WC_MAX_DIGEST_SIZE + 1];
+            /* tracks the sign-side bound; see the question block in
+             * wolfcrypt/src/ecc.c */
+            byte   longDigest[WC_MAX_DIGEST_SIZE_FOR_SIGN + 1];
 
             XMEMSET(longDigest, 0x24, sizeof(longDigest));
             ExpectIntEQ(mp_init(&r), MP_OKAY);
@@ -2833,7 +2848,9 @@ int test_wc_EccDecisionCoverage(void)
         mp_int r, s;
         int    res = 0;
         byte   shortHash[1] = { 0x42 };
-        byte   longHash[WC_MAX_DIGEST_SIZE + 1];
+        /* tracks the verify-side bound; see the question block in
+         * wolfcrypt/src/ecc.c */
+        byte   longHash[WC_MAX_DIGEST_SIZE_FOR_VERIFY + 1];
 
         XMEMSET(longHash, 0x24, sizeof(longHash));
         ExpectIntEQ(mp_init(&r), MP_OKAY);

@@ -287,6 +287,42 @@ typedef struct {
     #endif
 #endif
 
+/* WC_MAX_DIGEST_SIZE_FOR_SIGN / _FOR_VERIFY.
+ *
+ * PROPOSED, NOT SUBMITTED. This branch exists to make a question concrete, not
+ * to assert that the current behaviour is wrong. See the question block in
+ * wolfcrypt/src/ecc.c above the ECDSA length checks.
+ *
+ * WC_MAX_DIGEST_SIZE is the longest digest produced by any hash algorithm
+ * ENABLED IN THIS BUILD. It is therefore a property of the configuration, and
+ * it cascades: SHA3 gives 64, else SHA-512 gives 64, else BLAKE2b 64, else
+ * SHA-384 48, else SHA-1+MD5 36, else SHA-256 32. ECDSA then uses it as the
+ * upper bound on a caller-supplied hash.
+ *
+ * The bound below is deliberately NOT derived from the enabled digest set, for
+ * the same reason WC_MIN_DIGEST_SIZE_FOR_VERIFY exists separately from
+ * WC_MIN_DIGEST_SIZE: what a verifier must accept is not determined by what
+ * this build happens to be able to compute. 64 is the largest standard digest
+ * length, so this preserves every currently accepted input and additionally
+ * accepts the lengths that a differently configured wolfSSL already accepts.
+ *
+ * Both are user-overridable, and both keep the existing relationship to
+ * WC_MIN_DIGEST_SIZE_FOR_*.
+ */
+#ifdef WC_MAX_DIGEST_SIZE_FOR_SIGN
+    wc_static_assert2(WC_MAX_DIGEST_SIZE_FOR_SIGN >= WC_MIN_DIGEST_SIZE_FOR_SIGN,
+                      "Supplied WC_MAX_DIGEST_SIZE_FOR_SIGN is out of range.");
+#else
+    #define WC_MAX_DIGEST_SIZE_FOR_SIGN 64
+#endif
+
+#ifdef WC_MAX_DIGEST_SIZE_FOR_VERIFY
+    wc_static_assert2(WC_MAX_DIGEST_SIZE_FOR_VERIFY >= WC_MIN_DIGEST_SIZE_FOR_VERIFY,
+                      "Supplied WC_MAX_DIGEST_SIZE_FOR_VERIFY is out of range.");
+#else
+    #define WC_MAX_DIGEST_SIZE_FOR_VERIFY 64
+#endif
+
 #if !defined(NO_ASN) || !defined(NO_DH) || defined(HAVE_ECC)
 WOLFSSL_API int wc_HashGetOID(enum wc_HashType hash_type);
 WOLFSSL_API enum wc_HashType wc_OidGetHash(int oid);

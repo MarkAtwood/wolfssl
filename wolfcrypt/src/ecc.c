@@ -7004,7 +7004,66 @@ int wc_ecc_sign_hash(const byte* in, word32 inlen, byte* out, word32 *outlen,
     if (in == NULL || out == NULL || outlen == NULL || key == NULL) {
         return ECC_BAD_ARG_E;
     }
-    if ((inlen > WC_MAX_DIGEST_SIZE) ||
+    /* ------------------------------------------------------------------
+     * QUESTION, not a bug report. This branch is a discussion artifact and is
+     * not proposed for merge as-is.
+     *
+     * The upper bound here was WC_MAX_DIGEST_SIZE, the longest digest produced
+     * by any hash algorithm ENABLED IN THIS BUILD (hash.h cascade: SHA3 -> 64,
+     * else SHA-512 -> 64, else BLAKE2b -> 64, else SHA-384 -> 48, else
+     * SHA-1+MD5 -> 36, else SHA-256 -> 32).
+     *
+     * Three observations, each reproducible:
+     *
+     * 1. The conformant truncation already exists in this same file:
+     *        if ((WOLFSSL_BIT_SIZE * inlen) > orderBits)
+     *            inlen = (orderBits + WOLFSSL_BIT_SIZE - 1) / WOLFSSL_BIT_SIZE;
+     *    which is FIPS 186-5 6.4 and SEC1 4.1.3. The bound above short-circuits
+     *    it, so above WC_MAX_DIGEST_SIZE that truncation cannot run.
+     *
+     * 2. Acceptance does not depend on the curve. Sweeping every compiled curve
+     *    against hash lengths 1..128 on three builds differing ONLY in digest
+     *    flags, the accepted set is identical for every curve and moves with the
+     *    build:
+     *        WC_MAX_DIGEST_SIZE 64 -> {20,28,32,33,36,48,64}
+     *        WC_MAX_DIGEST_SIZE 48 -> {20,28,32,33,36,48}
+     *        WC_MAX_DIGEST_SIZE 32 -> {20,28,32}
+     *    Every rejection is explained by (len > max) or (len < min). The curve
+     *    order never participates.
+     *
+     * 3. The case hardest to read as intentional: SECP521R1 has a 521-bit order,
+     *    i.e. 66 bytes, so a 64-byte hash is SHORTER than the order and no
+     *    truncation is required or performed. It is accepted when SHA-512 is
+     *    compiled in and rejected with BAD_LENGTH_E when it is not.
+     *
+     * SO THE QUESTIONS ARE:
+     *
+     *   Q1. Is it intended that the truncation is unreachable for inputs above
+     *       WC_MAX_DIGEST_SIZE?
+     *
+     *   Q2. WC_MIN_DIGEST_SIZE was deliberately split into _FOR_SIGN and
+     *       _FOR_VERIFY (12272e1c06) so sign-side restrictions would not bind
+     *       verification. Should the maximum be split the same way? Today
+     *       WC_MAX_DIGEST_SIZE_FOR_* does not exist anywhere in the tree.
+     *
+     *   Q3. Should wc_ecc_verify_hash, a public API taking caller-supplied
+     *       bytes, refuse a hash that fits within the curve order because of
+     *       which digests this build compiles? A verifier does not choose the
+     *       digest; the signer does.
+     *
+     * The change below is the smallest one that makes the bound independent of
+     * the compiled digest set, mirroring the existing _FOR_SIGN/_FOR_VERIFY
+     * precedent. It preserves every currently accepted input. It is offered to
+     * make Q2 concrete, not because this shape is necessarily the right fix.
+     * It requires changing the assertions added alongside the original bound in
+     * tests/api/test_ecc.c, which is exactly why this is a question first.
+     *
+     * Scope, stated up front: FIPS builds are unaffected. configure.ac prevents
+     * disabling SHA-512/SHA-3 under ENABLED_FIPS_DEV, so WC_MAX_DIGEST_SIZE is
+     * 64 there. The reachable case is a non-FIPS build with the long digests
+     * trimmed, where the hash necessarily originates outside wolfSSL.
+     * ------------------------------------------------------------------ */
+    if ((inlen > WC_MAX_DIGEST_SIZE_FOR_SIGN) ||
         (inlen < WC_MIN_DIGEST_SIZE_FOR_SIGN))
     {
         return BAD_LENGTH_E;
@@ -7218,7 +7277,8 @@ int wc_ecc_sign_hash_ex(const byte* in, word32 inlen, WC_RNG* rng,
     if (in == NULL || r == NULL || s == NULL || key == NULL || rng == NULL) {
         return ECC_BAD_ARG_E;
     }
-    if ((inlen > WC_MAX_DIGEST_SIZE) || (inlen < WC_MIN_DIGEST_SIZE)) {
+    /* See the question block above the first ECDSA length check in this file. */
+    if ((inlen > WC_MAX_DIGEST_SIZE_FOR_SIGN) || (inlen < WC_MIN_DIGEST_SIZE)) {
         return BAD_LENGTH_E;
     }
 #ifndef WC_ALLOW_ECC_ZERO_HASH
@@ -7654,7 +7714,8 @@ int wc_ecc_sign_hash_ex(const byte* in, word32 inlen, WC_RNG* rng,
    if (in == NULL || r == NULL || s == NULL || key == NULL || rng == NULL) {
        return ECC_BAD_ARG_E;
    }
-   if ((inlen > WC_MAX_DIGEST_SIZE) ||
+   /* See the question block above the first ECDSA length check in this file. */
+   if ((inlen > WC_MAX_DIGEST_SIZE_FOR_SIGN) ||
        (inlen < WC_MIN_DIGEST_SIZE_FOR_SIGN))
    {
        return BAD_LENGTH_E;
@@ -9156,7 +9217,9 @@ int wc_ecc_verify_hash(const byte* sig, word32 siglen, const byte* hash,
     }
 
     /* Check hash length */
-    if ((hashlen > WC_MAX_DIGEST_SIZE) ||
+    /* See the question block above the first ECDSA length check in this file.
+     * Q3 is specifically about this one: a verifier does not choose the digest. */
+    if ((hashlen > WC_MAX_DIGEST_SIZE_FOR_VERIFY) ||
         (hashlen < WC_MIN_DIGEST_SIZE_FOR_VERIFY)) {
         return BAD_LENGTH_E;
     }
@@ -9854,7 +9917,9 @@ int wc_ecc_verify_hash_ex(mp_int *r, mp_int *s, const byte* hash,
     if (r == NULL || s == NULL || hash == NULL || res == NULL || key == NULL) {
         return ECC_BAD_ARG_E;
     }
-    if ((hashlen > WC_MAX_DIGEST_SIZE) || (hashlen < WC_MIN_DIGEST_SIZE)) {
+    /* See the question block above the first ECDSA length check in this file. */
+    if ((hashlen > WC_MAX_DIGEST_SIZE_FOR_VERIFY) ||
+        (hashlen < WC_MIN_DIGEST_SIZE)) {
         return BAD_LENGTH_E;
     }
 #ifndef WC_ALLOW_ECC_ZERO_HASH
@@ -9904,7 +9969,9 @@ int wc_ecc_verify_hash_ex(mp_int *r, mp_int *s, const byte* hash,
        return ECC_BAD_ARG_E;
 
     /* Check hash length */
-    if ((hashlen > WC_MAX_DIGEST_SIZE) ||
+    /* See the question block above the first ECDSA length check in this file.
+     * Q3 is specifically about this one: a verifier does not choose the digest. */
+    if ((hashlen > WC_MAX_DIGEST_SIZE_FOR_VERIFY) ||
         (hashlen < WC_MIN_DIGEST_SIZE_FOR_VERIFY)) {
         return BAD_LENGTH_E;
     }
